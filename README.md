@@ -1,4 +1,39 @@
-# OdinEye P1B — FOV-complete BEV + metric scale token
+# OdinEye P2B — Two Experts + metric Scale Token
+
+The active implementation is a from-scratch replacement for the former P1B
+occupancy objective. Frozen VGGT aggregation runs exactly once per RGB window.
+Independent Observed, Guessed and Routing paths consume the same frozen token
+memory, so expert losses do not update one another through a trainable adapter.
+
+Two strict variants are supported:
+
+- `P2B-NLL`: Beta evidence, pixelwise Evidential NLL and annealed wrong-evidence
+  KL for guessed completion;
+- `P2B-BCE`: Bernoulli logits and pixelwise BCE, with classification certainty
+  but no claim of epistemic confidence.
+
+Both variants retain the same RGB-only runtime contract, 512x512/6.5 m single
+BEV, 800x800/10 m merged BEV and metric Scale Token. Inside the FOV, GT hard
+routing separates directly observed free/first-hit surface cells from occluded
+completion. Outside the FOV remains unknown.
+
+The new training entrypoint is:
+
+```bash
+python -m vggt_bev_method1.cli_train_p2b --config CONFIG.toml
+```
+
+Checkpoint schemas are intentionally incompatible:
+
+```text
+P2B-NLL: p2b-two-expert-evidential-ray-v1
+P2B-BCE: p2b-two-expert-bce-ray-v1
+```
+
+Legacy P1B modules remain in the repository only for historical comparison and
+old checkpoint inspection. They are not called by `cli_train_p2b`.
+
+## Legacy P1B reference
 
 This project implements the revised non-cascaded P1B. A frozen VGGT-Ω
 aggregator runs once per RGB window. One trainable extension reads its shared

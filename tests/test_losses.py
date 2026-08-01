@@ -191,7 +191,7 @@ def test_observed_surface_is_pointwise_not_area_dice() -> None:
     assert "observed_dice_loss" not in correct_loss
 
 
-def test_observed_surface_accepts_a_hit_inside_decoder_tolerance() -> None:
+def test_legacy_observed_surface_requires_the_exact_target_cell() -> None:
     complete = torch.full((1, 9, 9), 255, dtype=torch.uint8)
     complete[:, 4, 4] = 0
     observed = complete.clone()
@@ -224,12 +224,13 @@ def test_observed_surface_accepts_a_hit_inside_decoder_tolerance() -> None:
         guessed_supervision_scale=0.0,
         surface_tolerance_pixels=2,
     )
-    assert near_loss["observed_surface_nll"] < far_loss[
-        "observed_surface_nll"
-    ]
+    assert torch.allclose(
+        near_loss["observed_surface_nll"],
+        far_loss["observed_surface_nll"],
+    )
 
 
-def test_surface_tolerance_band_is_not_also_supervised_as_free() -> None:
+def test_legacy_loss_keeps_free_supervision_around_a_surface() -> None:
     complete = torch.full((1, 9, 9), 255, dtype=torch.uint8)
     complete[:, 4, 4] = 0
     observed = complete.clone()
@@ -263,17 +264,15 @@ def test_surface_tolerance_band_is_not_also_supervised_as_free() -> None:
         guessed_supervision_scale=0.0,
         surface_tolerance_pixels=2,
     )
-    assert torch.allclose(
-        first_loss["observed_free_nll"],
-        second_loss["observed_free_nll"],
-    )
+    assert second_loss["observed_free_nll"] > first_loss["observed_free_nll"]
     assert torch.allclose(
         first_loss["observed_surface_nll"],
         second_loss["observed_surface_nll"],
     )
-    assert first_loss["observed_free_supervised_fraction"] < first_loss[
-        "observed_free_fraction"
-    ]
+    assert torch.equal(
+        first_loss["observed_free_supervised_fraction"],
+        first_loss["observed_free_fraction"],
+    )
 
 
 def test_guessed_overlap_is_macro_occupied_and_free_dice() -> None:
