@@ -1,0 +1,508 @@
+from __future__ import annotations
+
+import json
+import random
+from collections import defaultdict
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import torch
+from PIL import Image
+from torch.utils.data import Dataset
+
+from vggt_bev_method1.config import LabelValues
+
+from .fov_targets import (
+    cap_complete_and_visible_to_fov,
+    fov_union_mask,
+    load_world_from_bev_planar,
+)
+from .preprocess import RGBResizePad
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    key: str
+    path: Path
+    dataset: str
+    scene_id: str
+    frame_count: int
+    metadata: dict
+    intrinsic: np.ndarray
+    source_height: int
+    source_width: int
+    depth_suffix: str
+    horizontal_fov_degrees: float
+    world_from_bev_planar: np.ndarray
+
+    @property
+    def scene_key(self) -> str:
+        return f"{self.dataset}:{self.scene_id}"
+
+
+@dataclass(frozen=True)
+class SampleRecord:
+    session_index: int
+    target_frame: int
+
+
+def discover_sessions(root: str | Path) -> list[Path]:
+    resolved = Path(root).expanduser().resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"dataset root does not exist: {resolved}")
+    sessions = sorted(
+        marker.parent
+        for marker in resolved.glob("GPU*/session_*/COMPLETE")
+        if marker.is_file()
+    )
+    if not sessions:
+        raise ValueError(f"no complete GPU*/session_* directories found under {resolved}")
+    return sessions
+
+
+def _depth_suffix(path: Path, metadata: dict) -> str:
+    configured = str(metadata.get("depth", {}).get("filename_pattern", "")).lower()
+    if configured.endswith(".npz"):
+        suffix = ".npz"
+    elif configured.endswith(".npy"):
+        suffix = ".npy"
+    elif (path / "depth/frame_000000.npz").is_file():
+        suffix = ".npz"
+    elif (path / "depth/frame_000000.npy").is_file():
+        suffix = ".npy"
+    else:
+        raise FileNotFoundError(f"session has no first metric-depth frame: {path}")
+    return suffix
+
+
+def _load_record(root: Path, path: Path) -> SessionRecord:
+    metadata_path = path / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("status") != "complete":
+        raise ValueError(f"session is not marked complete: {path}")
+    if int(metadata.get("schema_version", 0)) < 4:
+        raise ValueError(f"new P1B requires schema version 4 or newer: {path}")
+    bev = metadata["bev"]
+    if [float(value) for value in bev["extent_classes_m"]] != [6.5]:
+        raise ValueError(f"session lacks the fixed 6.5 m BEV target: {path}")
+    if int(bev["size"]) != 512:
+        raise ValueError(f"session BEV raster size is not 512x512: {path}")
+    if [float(value) for value in bev.get("merged_normalized_extents_m", [])] != [
+        10.0
+    ]:
+        raise ValueError(f"session lacks the fixed 10 m merged target: {path}")
+    if list(bev.get("merged_normalized_size", [])) != [512, 512]:
+        raise ValueError(f"source merged target is not 512x512: {path}")
+    if bev.get("masked_values") != {"occupied": 0, "unknown": 112, "free": 255}:
+        raise ValueError(f"session BEV labels do not match the P1B contract: {path}")
+    if bev.get("merged_orientation") != (
+        "ego-centric in every output; latest robot centered and forward up"
+    ):
+        raise ValueError(f"session orientation is not latest-ego/forward-up: {path}")
+
+    depth = metadata.get("depth", {})
+    if str(depth.get("units", "")).lower() not in ("metres", "meters", "m"):
+        raise ValueError(f"GT depth is not metric: {path}")
+    if "pinhole depth sensor" not in str(depth.get("source", "")).lower():
+        raise ValueError(f"GT depth source is not a pinhole z-depth sensor: {path}")
+
+    camera = metadata.get("camera_intrinsics", {})
+    intrinsic = np.asarray(camera.get("K"), dtype=np.float32)
+    if intrinsic.shape != (3, 3):
+        raise ValueError(f"camera_intrinsics.K is missing or invalid: {path}")
+    source_height = int(camera.get("height", 0))
+    source_width = int(camera.get("width", 0))
+    if source_height <= 0 or source_width <= 0:
+        raise ValueError(f"source RGB/depth size is invalid: {path}")
+    horizontal_fov_degrees = float(camera.get("horizontal_fov_degrees", 0.0))
+    if horizontal_fov_degrees <= 0.0:
+        fx = float(intrinsic[0, 0])
+        horizontal_fov_degrees = float(
+            np.degrees(2.0 * np.arctan(source_width / (2.0 * fx)))
+        )
+    if not 0.0 < horizontal_fov_degrees < 180.0:
+        raise ValueError(f"horizontal camera FOV is invalid: {path}")
+    frame_count = int(metadata["frame_count"])
+    if frame_count < 1:
+        raise ValueError(f"session frame_count must be positive: {path}")
+    extrinsics_path = path / str(
+        metadata.get("camera_extrinsics_file", "camera_extrinsics.jsonl")
+    )
+    if not extrinsics_path.is_file():
+        raise FileNotFoundError(
+            f"session lacks camera extrinsics required by FOV GT: {path}"
+        )
+    extrinsic_records = [
+        json.loads(line)
+        for line in extrinsics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    world_from_bev_planar = load_world_from_bev_planar(
+        extrinsic_records,
+        expected_frames=frame_count,
+    )
+    return SessionRecord(
+        key=path.relative_to(root).as_posix(),
+        path=path,
+        dataset=str(metadata["dataset"]),
+        scene_id=str(metadata["scene_id"]),
+        frame_count=frame_count,
+        metadata=metadata,
+        intrinsic=intrinsic,
+        source_height=source_height,
+        source_width=source_width,
+        depth_suffix=_depth_suffix(path, metadata),
+        horizontal_fov_degrees=horizontal_fov_degrees,
+        world_from_bev_planar=world_from_bev_planar,
+    )
+
+
+def load_session_records(
+    root: str | Path,
+    session_keys: Sequence[str] | None = None,
+) -> list[SessionRecord]:
+    resolved = Path(root).expanduser().resolve()
+    if session_keys is None:
+        paths = discover_sessions(resolved)
+    else:
+        if len(set(session_keys)) != len(session_keys):
+            raise ValueError("requested session keys contain duplicates")
+        paths = []
+        for key in session_keys:
+            relative = Path(key)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"session key is not a safe relative path: {key}")
+            path = (resolved / relative).resolve()
+            if not path.is_relative_to(resolved):
+                raise ValueError(f"session key escapes the dataset root: {key}")
+            if not (path / "COMPLETE").is_file():
+                raise FileNotFoundError(f"manifest session is not complete: {path}")
+            paths.append(path)
+    return [_load_record(resolved, path) for path in paths]
+
+
+def split_sessions_by_scene(
+    root: str | Path,
+    *,
+    validation_fraction: float = 0.1,
+    seed: int = 17,
+) -> tuple[list[str], list[str]]:
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between zero and one")
+    records = load_session_records(root)
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for record in records:
+        grouped[record.scene_key].append(record.key)
+    scene_keys = sorted(grouped)
+    if len(scene_keys) < 2:
+        raise ValueError("at least two scenes are required for a scene-grouped split")
+    random.Random(seed).shuffle(scene_keys)
+    validation_scene_count = max(1, round(len(scene_keys) * validation_fraction))
+    validation_scene_count = min(validation_scene_count, len(scene_keys) - 1)
+    validation_scenes = set(scene_keys[:validation_scene_count])
+    train = sorted(
+        key
+        for scene, session_keys in grouped.items()
+        if scene not in validation_scenes
+        for key in session_keys
+    )
+    validation = sorted(
+        key
+        for scene, session_keys in grouped.items()
+        if scene in validation_scenes
+        for key in session_keys
+    )
+    return train, validation
+
+
+class VGGNAVMethod1Dataset(Dataset[dict]):
+    """RGB runtime input plus on-the-fly FOV-complete training targets.
+
+    Collision-truth complete rasters are clipped by an unobstructed camera-FOV
+    footprint during ``__getitem__``. Existing visibility-masked rasters split
+    valid FOV cells into directly visible and occluded/inferred regions.
+    Neither labels nor GT camera geometry enter the runtime model forward.
+    """
+
+    labels = LabelValues()
+    single_bev_output_size = 512
+    single_bev_extent_m = 6.5
+    merged_bev_output_size = 800
+    merged_bev_extent_m = 10.0
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        supervision: str = "metric_fov_complete_evidential",
+        preprocess: RGBResizePad | None = None,
+        session_keys: Sequence[str] | None = None,
+        sample_stride: int = 1,
+        minimum_history: int = 1,
+        maximum_history: int = 34,
+    ) -> None:
+        if supervision != "metric_fov_complete_evidential":
+            raise ValueError(
+                "P1B supervision must be metric_fov_complete_evidential"
+            )
+        if sample_stride <= 0 or minimum_history <= 0 or maximum_history <= 0:
+            raise ValueError("history and stride settings must be positive")
+        if minimum_history > maximum_history:
+            raise ValueError("minimum_history cannot exceed maximum_history")
+        self.root = Path(root).expanduser().resolve()
+        self.supervision = supervision
+        self.preprocess = preprocess or RGBResizePad()
+        self.sessions = tuple(load_session_records(self.root, session_keys))
+        self.samples: list[SampleRecord] = []
+        for session_index, session in enumerate(self.sessions):
+            final_target = min(session.frame_count, maximum_history) - 1
+            for target in range(minimum_history - 1, final_target + 1, sample_stride):
+                self.samples.append(SampleRecord(session_index, target))
+        if not self.samples:
+            raise ValueError("dataset settings produced no samples")
+
+    @property
+    def scene_keys(self) -> set[str]:
+        return {session.scene_key for session in self.sessions}
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    @staticmethod
+    def _load_depth(path: Path) -> np.ndarray:
+        loaded = np.load(path, allow_pickle=False)
+        if isinstance(loaded, np.lib.npyio.NpzFile):
+            try:
+                if "depth" not in loaded:
+                    raise ValueError(f"compressed depth file lacks 'depth': {path}")
+                depth = loaded["depth"]
+            finally:
+                loaded.close()
+        else:
+            depth = loaded
+        depth = np.asarray(depth, dtype=np.float32)
+        if depth.ndim == 3 and depth.shape[-1] == 1:
+            depth = depth[..., 0]
+        if depth.ndim != 2:
+            raise ValueError(f"GT depth must be HxW: {path}")
+        return depth
+
+    @classmethod
+    def _load_bev(cls, path: Path, *, output_size: int) -> torch.Tensor:
+        with Image.open(path) as image:
+            if image.mode != "L" or image.size != (512, 512):
+                raise ValueError(f"metric BEV target must be 512x512 grayscale: {path}")
+            if output_size != 512:
+                image = image.resize(
+                    (output_size, output_size),
+                    Image.Resampling.NEAREST,
+                )
+            labels = torch.from_numpy(np.asarray(image, dtype=np.uint8).copy())
+        values = {int(value) for value in torch.unique(labels)}
+        allowed = {cls.labels.occupied, cls.labels.unknown, cls.labels.free}
+        if not values <= allowed:
+            raise ValueError(f"target contains invalid values {sorted(values - allowed)}")
+        return labels
+
+    @classmethod
+    def _validate_bev_pair(
+        cls,
+        complete: torch.Tensor,
+        observed: torch.Tensor,
+        *,
+        name: str,
+    ) -> None:
+        if complete.shape != observed.shape:
+            raise ValueError(f"{name} complete/observed shapes do not match")
+        complete_valid = complete != cls.labels.unknown
+        observed_valid = observed != cls.labels.unknown
+        if bool((observed_valid & ~complete_valid).any()):
+            raise ValueError(f"{name} observed cells lie outside complete GT")
+        if bool((observed_valid & (observed != complete)).any()):
+            raise ValueError(f"{name} observed labels disagree with complete GT")
+
+    def __getitem__(self, index: int) -> dict:
+        sample = self.samples[index]
+        session = self.sessions[sample.session_index]
+        target_frame = sample.target_frame
+        images: list[torch.Tensor] = []
+        depths: list[torch.Tensor] = []
+        depth_valid: list[torch.Tensor] = []
+        for frame in range(target_frame + 1):
+            rgb_path = session.path / "camera" / f"frame_{frame:06d}.png"
+            with Image.open(rgb_path) as image:
+                if (image.height, image.width) != (
+                    session.source_height,
+                    session.source_width,
+                ):
+                    raise ValueError(f"RGB dimensions disagree with K: {rgb_path}")
+                images.append(self.preprocess(image))
+            depth_path = (
+                session.path
+                / "depth"
+                / f"frame_{frame:06d}{session.depth_suffix}"
+            )
+            depth, valid = self.preprocess.depth(self._load_depth(depth_path))
+            depths.append(depth)
+            depth_valid.append(valid)
+
+        single_observed_path = (
+            session.path
+            / "bev_6p5m/masked"
+            / f"frame_{target_frame:06d}.png"
+        )
+        single_complete_path = (
+            session.path
+            / "bev_6p5m/complete"
+            / f"frame_{target_frame:06d}.png"
+        )
+        merged_observed_path = (
+            session.path
+            / "bev_6p5m/merged_masked_10m"
+            / f"frame_{target_frame:06d}.png"
+        )
+        merged_complete_path = (
+            session.path
+            / "bev_6p5m/merged_complete_10m"
+            / f"frame_{target_frame:06d}.png"
+        )
+        source_single_complete = self._load_bev(
+            single_complete_path,
+            output_size=self.single_bev_output_size,
+        )
+        if bool((source_single_complete == self.labels.unknown).any()):
+            raise ValueError(
+                f"single complete target contains unknown cells: {single_complete_path}"
+            )
+        source_single_visible = self._load_bev(
+            single_observed_path,
+            output_size=self.single_bev_output_size,
+        )
+        source_merged_complete = self._load_bev(
+            merged_complete_path,
+            output_size=self.merged_bev_output_size,
+        )
+        source_merged_visible = self._load_bev(
+            merged_observed_path,
+            output_size=self.merged_bev_output_size,
+        )
+        self._validate_bev_pair(
+            source_single_complete,
+            source_single_visible,
+            name="single",
+        )
+        self._validate_bev_pair(
+            source_merged_complete,
+            source_merged_visible,
+            name="merged",
+        )
+
+        single_fov = fov_union_mask(
+            session.world_from_bev_planar[target_frame : target_frame + 1],
+            target_frame=0,
+            horizontal_fov_degrees=session.horizontal_fov_degrees,
+            output_size=self.single_bev_output_size,
+            output_extent_m=self.single_bev_extent_m,
+            source_extent_m=self.single_bev_extent_m,
+        )
+        merged_fov = fov_union_mask(
+            session.world_from_bev_planar,
+            target_frame=target_frame,
+            horizontal_fov_degrees=session.horizontal_fov_degrees,
+            output_size=self.merged_bev_output_size,
+            output_extent_m=self.merged_bev_extent_m,
+            source_extent_m=self.single_bev_extent_m,
+        )
+        (
+            single_fov_complete,
+            single_visible,
+            single_fov_support,
+        ) = cap_complete_and_visible_to_fov(
+            source_single_complete,
+            source_single_visible,
+            single_fov,
+            labels=self.labels,
+        )
+        (
+            merged_fov_complete,
+            merged_visible,
+            merged_fov_support,
+        ) = cap_complete_and_visible_to_fov(
+            source_merged_complete,
+            source_merged_visible,
+            merged_fov,
+            labels=self.labels,
+        )
+        self._validate_bev_pair(
+            single_fov_complete,
+            single_visible,
+            name="single FOV-complete",
+        )
+        self._validate_bev_pair(
+            merged_fov_complete,
+            merged_visible,
+            name="merged FOV-complete",
+        )
+        intrinsic = self.preprocess.intrinsics(
+            session.intrinsic,
+            source_height=session.source_height,
+            source_width=session.source_width,
+        )
+        frame_ids = list(range(target_frame + 1))
+        return {
+            "images": torch.stack(images),
+            "scale_gt_depth_m": torch.stack(depths),
+            "scale_gt_valid_mask": torch.stack(depth_valid),
+            "scale_gt_intrinsics": intrinsic.unsqueeze(0).expand(
+                target_frame + 1, -1, -1
+            ).clone(),
+            "single_fov_complete_target": single_fov_complete,
+            "single_visible_target": single_visible,
+            "single_fov_support_target": single_fov_support,
+            "merged_fov_complete_target": merged_fov_complete,
+            "merged_visible_target": merged_visible,
+            "merged_fov_support_target": merged_fov_support,
+            "metadata": {
+                "sample_id": f"{session.key}:frame_{target_frame:06d}",
+                "session_key": session.key,
+                "session_id": session.path.name,
+                "dataset": session.dataset,
+                "scene_id": session.scene_id,
+                "scene_key": session.scene_key,
+                "reference_frame_id": target_frame,
+                "source_frame_ids": frame_ids,
+                "history_frame_count": target_frame + 1,
+                "single_source_complete_path": str(single_complete_path),
+                "single_source_visible_path": str(single_observed_path),
+                "merged_source_complete_path": str(merged_complete_path),
+                "merged_source_visible_path": str(merged_observed_path),
+                "fov_target_generation": "on_the_fly_unobstructed_horizontal_frustum_v1",
+                "horizontal_fov_degrees": session.horizontal_fov_degrees,
+                "gt_depth_convention": "camera_axis_z_depth_m",
+                "preprocessing_version": self.preprocess.version,
+                "coordinate_mode": "p1b_fixed_metric",
+                "single_bev_extent_m": self.single_bev_extent_m,
+                "single_bev_output_size": self.single_bev_output_size,
+                "single_bev_cell_size_m": (
+                    self.single_bev_extent_m / self.single_bev_output_size
+                ),
+                "single_bev_bounds_m": [-3.25, 3.25, -3.25, 3.25],
+                "merged_bev_extent_m": self.merged_bev_extent_m,
+                "merged_bev_output_size": self.merged_bev_output_size,
+                "merged_bev_cell_size_m": (
+                    self.merged_bev_extent_m / self.merged_bev_output_size
+                ),
+                "merged_bev_bounds_m": [-5.0, 5.0, -5.0, 5.0],
+                "orientation": "latest ego centered; forward is image-up",
+                "runtime_model_inputs": ["rgb_window"],
+                "bev_content_supervision": (
+                    "complete_collision_truth_inside_camera_fov_union"
+                ),
+                "bev_confidence_supervision": (
+                    "visible_masked_vs_fov_complete_occluded_relationship"
+                ),
+                "outside_fov_semantics": "unknown",
+            },
+        }
