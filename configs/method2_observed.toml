@@ -1,0 +1,31 @@
+[data]
+root = "/home/user/Project/VGGNAV/output/random_sessions_test_3"
+extent_key = "bev_5m"
+target_mode = "single"
+geometry_source = "vggt"
+image_height = 384
+image_width = 512
+sample_stride = 1
+
+[model]
+vggt_source = "/home/user/Project/vggt"
+checkpoint = "/home/user/Project/vggt/checkpoints/VGGT-Omega-1B-512/model.pt"
+vggt_execution = "live"
+patch_size = 16
+feature_dim = 2048
+hidden_dim = 96
+bev_feature_size = 128
+output_size = 512
+ray_steps = 32
+learn_depth_scale = true
+initial_depth_scale = 1.0
+
+[training]
+epochs = 10
+learning_rate = 0.0002
+weight_decay = 0.0001
+occupancy_weight = 1.0
+observation_weight = 0.5
+dice_weight = 0.25
+seed = 7
+output_dir = "runs/method2_single"

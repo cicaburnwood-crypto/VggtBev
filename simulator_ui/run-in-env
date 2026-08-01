@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$script_dir/.." && pwd)"
+
+MAMBA_EXE="${MAMBA_EXE:-}"
+if [[ -z "$MAMBA_EXE" ]]; then
+    for candidate in \
+        /home/user/.local/bin/micromamba \
+        "$project_root/../../micromamba/bin/micromamba"
+    do
+        if [[ -x "$candidate" ]]; then
+            MAMBA_EXE="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -z "$MAMBA_EXE" || ! -x "$MAMBA_EXE" ]]; then
+    echo "micromamba executable was not found; set MAMBA_EXE" >&2
+    exit 1
+fi
+
+ENV_PREFIX="${VGGNAV_HABITAT_ENV:-}"
+if [[ -z "$ENV_PREFIX" ]]; then
+    for candidate in \
+        "$project_root/../VGGNAV/.micromamba/envs/habitat-sim" \
+        "$project_root/../../micromamba/envs/vggnav-habitat"
+    do
+        if [[ -x "$candidate/bin/python" ]]; then
+            ENV_PREFIX="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -z "$ENV_PREFIX" || ! -x "$ENV_PREFIX/bin/python" ]]; then
+    echo "Habitat-Sim environment was not found; set VGGNAV_HABITAT_ENV" >&2
+    exit 1
+fi
+
+export __NV_PRIME_RENDER_OFFLOAD="${__NV_PRIME_RENDER_OFFLOAD:-1}"
+export __GLX_VENDOR_LIBRARY_NAME="${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
+
+exec "$MAMBA_EXE" run -p "$ENV_PREFIX" "$@"

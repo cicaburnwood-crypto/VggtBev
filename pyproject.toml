@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vggt-bev"
+version = "0.4.0"
+description = "Method II observed-area BEV training pipeline for VGGT-Omega"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26,<2",
+  "Pillow>=10",
+  "torch>=2.2",
+  "torchvision>=0.17",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+vggt-bev-validate = "vggt_bev.cli_validate:main"
+vggt-bev-train = "vggt_bev.cli_train:main"
+vggt-bev-live-smoke = "vggt_bev.cli_smoke:main"
+vggt-bev-infer = "vggt_bev.cli_infer:main"
+vggt-bev-runtime-server = "vggt_bev.cli_runtime_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The copied Habitat-Sim UI runs in VGGNAV's Python 3.9 environment.
+"simulator_ui/*.py" = ["B905", "I001", "UP006", "UP035", "UP037", "UP045"]

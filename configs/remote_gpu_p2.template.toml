@@ -1,0 +1,68 @@
+# Template for /home/user/VGGT/method2_train on remote_gpu.
+# Confirm and stage the three INPUT_PATH_REQUIRED locations before using this
+# file for a job. Do not copy remote_gpu_a paths into this server configuration.
+
+[data]
+root = "/home/user/VGGT/INPUT_PATH_REQUIRED/data_build_unlimited"
+extent_key = "bev_6p5m"
+target_mode = "both"
+geometry_source = "vggt"
+coordinate_mode = "vggt_normalized"
+expected_merged_extent_m = 10.0
+required_merged_fusion_version = 2
+validate_paths_on_init = false
+single_target_size = 512
+merged_target_size = 800
+image_height = 384
+image_width = 512
+sample_stride = 1
+validation_fraction = 0.2
+split_group = "scene"
+split_strategy = "stable_hash"
+
+[model]
+vggt_source = "/home/user/VGGT/INPUT_PATH_REQUIRED/vggt"
+checkpoint = "/home/user/VGGT/INPUT_PATH_REQUIRED/VGGT-Omega-1B-512/model.pt"
+vggt_execution = "live"
+patch_size = 16
+feature_dim = 2048
+hidden_dim = 96
+single_bev_feature_size = 256
+merged_bev_feature_size = 400
+single_output_size = 512
+merged_output_size = 800
+ray_steps = 768
+metric_scale_mode = "vggt_normalized"
+normalizer_hidden_dim = 96
+initial_normalized_single_span = 2.0
+stabilize_intrinsics = true
+filter_by_height = false
+minimum_confidence = 0.05
+minimum_depth_m = 0.0001
+maximum_depth_m = 10000.0
+ground_minimum_points = 48
+ground_candidate_quantile = 0.55
+ground_maximum_candidate_quantile = 0.995
+ground_irls_iterations = 5
+ground_huber_delta = 2.5
+ground_maximum_tilt_degrees = 35.0
+learn_depth_scale = false
+initial_depth_scale = 1.0
+
+[training]
+epochs = 10
+# Keep this at 1 until equal-history bucketing is implemented and tested.
+batch_size_per_gpu = 1
+prefetch_factor = 2
+learning_rate = 0.0002
+weight_decay = 0.0001
+occupancy_weight = 1.0
+observation_weight = 0.5
+dice_weight = 0.25
+single_task_weight = 0.5
+merged_task_weight = 0.5
+seed = 7
+log_every_steps = 10
+checkpoint_every_steps = 500
+output_dir = "/home/user/VGGT/method2_train/runs/p2_vggt_normalized"
+

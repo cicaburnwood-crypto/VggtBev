@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VGGTBEV Direct Comparison</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b10;
+      --panel: #121821;
+      --panel-2: #0c1118;
+      --line: #293442;
+      --text: #edf3f8;
+      --muted: #91a0af;
+      --green: #34e98a;
+      --cyan: #48cfff;
+      --amber: #ffc24c;
+      --red: #ff5968;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 0%, #17283d 0, transparent 32rem),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+    header {
+      min-height: 64px;
+      padding: 12px 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(8, 11, 16, .88);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 10px;
+      display: grid; place-items: center;
+      color: #07130d; font-weight: 900;
+      background: linear-gradient(135deg, var(--green), var(--cyan));
+    }
+    h1 { margin: 0; font-size: 17px; }
+    .subtitle { margin-top: 2px; color: var(--muted); font-size: 12px; }
+    .connection { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); }
+    .dot.online { background: var(--green); box-shadow: 0 0 13px var(--green); }
+    main {
+      width: min(1900px, 100%);
+      margin: 0 auto;
+      padding: 18px;
+      display: grid;
+      grid-template-columns:
+        minmax(300px, .62fr)
+        minmax(340px, .78fr)
+        minmax(720px, 1.5fr);
+      grid-template-areas: "camera navigation comparison";
+      gap: 16px;
+      align-items: start;
+    }
+    .card {
+      min-width: 0;
+      background: linear-gradient(180deg, rgba(21,28,38,.97), rgba(12,17,24,.97));
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 16px 38px rgba(0,0,0,.28);
+    }
+    .card-head {
+      min-height: 55px;
+      padding: 13px 15px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .card-title { font-weight: 750; }
+    .camera-card { grid-area: camera; }
+    .navigation-card { grid-area: navigation; }
+    .comparison-card { grid-area: comparison; }
+    .tag {
+      max-width: 62%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+    }
+    .map-wrap {
+      padding: 14px;
+      display: grid;
+      place-items: center;
+      min-height: 480px;
+      background: #04070a;
+    }
+    .camera-wrap {
+      padding: 14px;
+      display: grid;
+      place-items: center;
+      background: #04070a;
+    }
+    #cameraStream {
+      display: block;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: contain;
+      border-radius: 10px;
+      background: #090d12;
+    }
+    .camera-note {
+      padding: 12px 15px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      font-size: 12px;
+    }
+    #mapCanvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-height: 68vh;
+      border-radius: 10px;
+      background: #090d12;
+      cursor: crosshair;
+    }
+    .nav-status {
+      padding: 12px 14px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      border-top: 1px solid var(--line);
+    }
+    .metric { padding: 8px 9px; border-radius: 9px; background: var(--panel-2); }
+    .metric-label {
+      color: var(--muted); font-size: 10px; text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+    .metric-value {
+      margin-top: 3px; font-weight: 650; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .controls { padding: 13px 14px 14px; border-top: 1px solid var(--line); }
+    .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: #19222d;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button:hover { border-color: #526275; }
+    button.primary { color: #06150d; background: var(--green); border-color: var(--green); }
+    button.manual-active { color: #06141a; background: var(--cyan); border-color: var(--cyan); }
+    .help { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    kbd {
+      display: inline-block; min-width: 22px; padding: 1px 5px; text-align: center;
+      border: 1px solid #455467; border-radius: 5px; background: #0a0f15;
+    }
+    .comparison {
+      display: grid;
+      grid-template-columns: 112px repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+    .cell { min-width: 0; background: #080c11; }
+    .column-head, .row-head {
+      min-height: 53px;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-weight: 700;
+      background: #111821;
+    }
+    .corner { background: #111821; }
+    .column-head.gt { color: var(--green); }
+    .column-head.model { color: var(--cyan); }
+    .column-head.predicted { color: var(--cyan); }
+    .row-head {
+      color: var(--muted);
+      letter-spacing: .04em;
+    }
+    .bev-pane { position: relative; padding: 10px; }
+    .bev-image {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: contain;
+      image-rendering: pixelated;
+      border-radius: 8px;
+      background:
+        linear-gradient(45deg, #10161e 25%, transparent 25%),
+        linear-gradient(-45deg, #10161e 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #10161e 75%),
+        linear-gradient(-45deg, transparent 75%, #10161e 75%),
+        #0a0e13;
+      background-size: 20px 20px;
+      background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+    }
+    .pane-label {
+      position: absolute;
+      left: 17px; bottom: 17px;
+      padding: 4px 7px;
+      border-radius: 6px;
+      background: rgba(4,7,10,.82);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .comparison-note {
+      padding: 12px 15px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .legend { margin-top: 5px; color: #bdc8d3; }
+    @media (max-width: 1500px) {
+      main {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-areas:
+          "camera navigation"
+          "comparison comparison";
+      }
+    }
+    @media (max-width: 1120px) {
+      main {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "camera"
+          "navigation"
+          "comparison";
+      }
+      .map-wrap { min-height: 360px; }
+    }
+    @media (max-width: 760px) {
+      main { padding: 9px; }
+      .comparison { grid-template-columns: 88px repeat(2, minmax(190px, 1fr)); }
+      .comparison-scroll { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">V</div>
+      <div>
+        <h1>VGGTBEV Direct Comparison</h1>
+        <div class="subtitle">HSSD navigation + synchronized Method II BEV</div>
+      </div>
+    </div>
+    <div class="connection">
+      <span id="connectionDot" class="dot"></span>
+      <span id="connectionText">Connecting</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card camera-card">
+      <div class="card-head">
+        <span class="card-title">Live camera view</span>
+        <span id="cameraMetadata" class="tag">Waiting for camera</span>
+      </div>
+      <div class="camera-wrap">
+        <img
+          id="cameraStream"
+          src="/stream/camera.mjpg"
+          alt="Live simulator RGB camera"
+        >
+      </div>
+      <div class="camera-note">
+        This RGB stream is the only per-frame sensor input sent to the Method II runtime.
+      </div>
+    </section>
+
+    <section class="card navigation-card">
+      <div class="card-head">
+        <span class="card-title">Click-to-navigate map</span>
+        <span id="hoverCoordinate" class="tag">Click a navigable point</span>
+      </div>
+      <div class="map-wrap">
+        <canvas id="mapCanvas" width="640" height="640"></canvas>
+      </div>
+      <div class="nav-status">
+        <div class="metric">
+          <div class="metric-label">Status</div>
+          <div id="navigationStatus" class="metric-value">Starting…</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Position X, Z</div>
+          <div id="position" class="metric-value">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Action / steps</div>
+          <div id="action" class="metric-value">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Random session</div>
+          <div id="sessionMetadata" class="metric-value">—</div>
+        </div>
+      </div>
+      <div class="controls">
+        <div class="buttons">
+          <button id="pauseButton">Pause</button>
+          <button id="resumeButton" class="primary">Resume</button>
+          <button id="cancelButton">Clear path</button>
+          <button id="manualButton" aria-pressed="false">Enable WASD</button>
+        </div>
+        <div class="help">
+          Click the map for auto-path finding. Enable manual mode for
+          <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>.
+        </div>
+      </div>
+    </section>
+
+    <section class="card comparison-card">
+      <div class="card-head">
+        <span id="comparisonTitle" class="card-title">Method II prediction</span>
+        <span id="comparisonStatus" class="tag">Waiting for model runtime</span>
+      </div>
+      <div class="comparison-scroll">
+        <div class="comparison">
+          <div class="cell corner"></div>
+          <div class="cell column-head gt">Simulator GT</div>
+          <div class="cell column-head predicted">Method II prediction</div>
+
+          <div class="cell row-head" data-model="3p5m">3.5 × 3.5 m</div>
+          <div class="cell bev-pane" data-model="3p5m">
+            <img id="gt3p5m" class="bev-image" alt="3.5 metre simulator ground-truth BEV">
+            <span class="pane-label">GT · 3.5 m</span>
+          </div>
+          <div class="cell bev-pane" data-model="3p5m">
+            <img id="pred3p5m" class="bev-image" alt="3.5 metre Method II prediction">
+            <span class="pane-label">3.5 m head</span>
+          </div>
+
+          <div class="cell row-head" data-model="5m">5 × 5 m</div>
+          <div class="cell bev-pane" data-model="5m">
+            <img id="gt5m" class="bev-image" alt="5 metre simulator ground-truth BEV">
+            <span class="pane-label">GT · 5 m</span>
+          </div>
+          <div class="cell bev-pane" data-model="5m">
+            <img id="pred5m" class="bev-image" alt="5 metre Method II prediction">
+            <span class="pane-label">5 m head</span>
+          </div>
+
+          <div class="cell row-head" data-model="6p5m">6.5 × 6.5 m</div>
+          <div class="cell bev-pane" data-model="6p5m">
+            <img id="gt6p5m" class="bev-image" alt="6.5 metre simulator ground-truth BEV">
+            <span class="pane-label">GT · 6.5 m</span>
+          </div>
+          <div class="cell bev-pane" data-model="6p5m">
+            <img id="pred6p5m" class="bev-image" alt="6.5 metre Method II prediction">
+            <span class="pane-label">6.5 m head</span>
+          </div>
+        </div>
+      </div>
+      <div class="comparison-note">
+        The runtime receives RGB only. Frozen VGGT estimates depth, intrinsics, and
+        relative poses; the selected trained Method II head predicts the masked BEV.
+        <div id="modelMetadata" class="legend">
+          Occupied 0 · unknown 112 · free 255
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const mapCanvas = document.getElementById('mapCanvas');
+    const mapContext = mapCanvas.getContext('2d');
+    const mapImage = new Image();
+    let state = null;
+    let connected = false;
+    let manualEnabled = false;
+    let manualDesired = null;
+    const manualKeys = new Set();
+    let manualPostChain = Promise.resolve();
+
+    mapImage.onload = drawMap;
+    mapImage.src = '/api/map.png';
+
+    function worldToMap(x, z) {
+      const map = state.map;
+      return [
+        (x - map.xmin) / (map.xmax - map.xmin) * mapCanvas.width,
+        mapCanvas.height - (z - map.zmin) / (map.zmax - map.zmin) * mapCanvas.height
+      ];
+    }
+
+    function mapToWorld(column, row) {
+      const map = state.map;
+      return [
+        map.xmin + column / mapCanvas.width * (map.xmax - map.xmin),
+        map.zmin + (1 - row / mapCanvas.height) * (map.zmax - map.zmin)
+      ];
+    }
+
+    function drawMap() {
+      if (!state || !state.map || !mapImage.complete || !mapImage.naturalWidth) return;
+      if (mapCanvas.width !== state.map.width || mapCanvas.height !== state.map.height) {
+        mapCanvas.width = state.map.width;
+        mapCanvas.height = state.map.height;
+      }
+      mapContext.drawImage(mapImage, 0, 0, mapCanvas.width, mapCanvas.height);
+      if (state.path && state.path.length > 1) {
+        mapContext.beginPath();
+        state.path.forEach((point, index) => {
+          const mapped = worldToMap(point[0], point[2]);
+          if (index) mapContext.lineTo(...mapped);
+          else mapContext.moveTo(...mapped);
+        });
+        mapContext.strokeStyle = '#ffc24c';
+        mapContext.lineWidth = 3;
+        mapContext.stroke();
+      }
+      if (state.goal) {
+        const [x, y] = worldToMap(state.goal[0], state.goal[2]);
+        mapContext.beginPath();
+        mapContext.arc(x, y, 7, 0, Math.PI * 2);
+        mapContext.fillStyle = '#34e98a';
+        mapContext.fill();
+      }
+      if (state.agent_position) {
+        const [x, y] = worldToMap(state.agent_position[0], state.agent_position[2]);
+        const heading = state.heading_xz || [0, -1];
+        const angle = Math.atan2(heading[0], -heading[1]);
+        mapContext.save();
+        mapContext.translate(x, y);
+        mapContext.rotate(angle);
+        mapContext.beginPath();
+        mapContext.moveTo(0, -10);
+        mapContext.lineTo(7, 7);
+        mapContext.lineTo(-7, 7);
+        mapContext.closePath();
+        mapContext.fillStyle = '#ff5968';
+        mapContext.fill();
+        mapContext.restore();
+      }
+    }
+
+    async function post(path, payload) {
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.error || `Request failed: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function manualKeyPayload() {
+      return {
+        forward: manualKeys.has('w'),
+        backward: manualKeys.has('s'),
+        left: manualKeys.has('a'),
+        right: manualKeys.has('d')
+      };
+    }
+
+    function queueManualPost(payload) {
+      manualPostChain = manualPostChain
+        .catch(() => undefined)
+        .then(() => post('/api/manual', payload));
+      return manualPostChain;
+    }
+
+    function updateManualUi() {
+      const button = document.getElementById('manualButton');
+      button.textContent = manualEnabled ? 'Disable WASD' : 'Enable WASD';
+      button.classList.toggle('manual-active', manualEnabled);
+      button.setAttribute('aria-pressed', String(manualEnabled));
+    }
+
+    function releaseManualKeys() {
+      if (!manualKeys.size) return;
+      manualKeys.clear();
+      if (manualEnabled) queueManualPost({keys: manualKeyPayload()});
+    }
+
+    mapCanvas.addEventListener('click', event => {
+      if (!state || !state.map) return;
+      const bounds = mapCanvas.getBoundingClientRect();
+      const column = (event.clientX - bounds.left) / bounds.width * mapCanvas.width;
+      const row = (event.clientY - bounds.top) / bounds.height * mapCanvas.height;
+      const [x, z] = mapToWorld(column, row);
+      post('/api/goal', {x, z}).catch(console.error);
+    });
+
+    mapCanvas.addEventListener('mousemove', event => {
+      if (!state || !state.map) return;
+      const bounds = mapCanvas.getBoundingClientRect();
+      const column = (event.clientX - bounds.left) / bounds.width * mapCanvas.width;
+      const row = (event.clientY - bounds.top) / bounds.height * mapCanvas.height;
+      const [x, z] = mapToWorld(column, row);
+      document.getElementById('hoverCoordinate').textContent =
+        `X ${x.toFixed(2)} · Z ${z.toFixed(2)}`;
+    });
+
+    document.getElementById('pauseButton').onclick =
+      () => post('/api/control', {action: 'pause'});
+    document.getElementById('resumeButton').onclick =
+      () => post('/api/control', {action: 'resume'});
+    document.getElementById('cancelButton').onclick = () => {
+      releaseManualKeys();
+      post('/api/control', {action: 'cancel'});
+    };
+    document.getElementById('manualButton').onclick = () => {
+      releaseManualKeys();
+      manualDesired = !(manualDesired === null ? manualEnabled : manualDesired);
+      manualEnabled = manualDesired;
+      updateManualUi();
+      queueManualPost({enabled: manualEnabled, keys: manualKeyPayload()})
+        .catch(() => { manualDesired = null; });
+    };
+
+    window.addEventListener('keydown', event => {
+      const key = event.key.toLowerCase();
+      if (!manualEnabled || !['w', 'a', 's', 'd'].includes(key)) return;
+      event.preventDefault();
+      if (event.repeat || manualKeys.has(key)) return;
+      manualKeys.add(key);
+      queueManualPost({keys: manualKeyPayload()});
+    });
+    window.addEventListener('keyup', event => {
+      const key = event.key.toLowerCase();
+      if (!manualKeys.has(key)) return;
+      event.preventDefault();
+      manualKeys.delete(key);
+      if (manualEnabled) queueManualPost({keys: manualKeyPayload()});
+    });
+    window.addEventListener('blur', releaseManualKeys);
+
+    async function pollState() {
+      try {
+        const response = await fetch('/api/state', {cache: 'no-store'});
+        state = await response.json();
+        connected = response.ok && state.ready;
+        document.getElementById('connectionDot').classList.toggle('online', connected);
+        document.getElementById('connectionText').textContent =
+          connected ? 'Simulator connected' : 'Connecting';
+        document.getElementById('navigationStatus').textContent = state.status || '—';
+        const activeModels = Object.keys(
+          (state.model_comparison && state.model_comparison.model_extents_m) || {}
+        );
+        if (activeModels.length) {
+          document.querySelectorAll('[data-model]').forEach((element) => {
+            element.style.display =
+              activeModels.includes(element.dataset.model) ? '' : 'none';
+          });
+          document.getElementById('comparisonTitle').textContent =
+            activeModels.length === 1
+              ? `${Number(state.model_comparison.model_extents_m[activeModels[0]]).toFixed(1)} × ` +
+                `${Number(state.model_comparison.model_extents_m[activeModels[0]]).toFixed(1)} m Method II`
+              : 'Method II prediction sizes';
+        }
+        const position = state.agent_position;
+        document.getElementById('position').textContent = position
+          ? `${position[0].toFixed(2)}, ${position[2].toFixed(2)}`
+          : '—';
+        document.getElementById('action').textContent =
+          `${state.last_action || (state.paused ? 'paused' : 'idle')} · ${state.step_count || 0}`;
+        const session = state.session;
+        const camera = state.camera;
+        document.getElementById('cameraMetadata').textContent =
+          camera
+            ? `${camera.width}×${camera.height} · ${camera.hfov_degrees.toFixed(1)}° · ` +
+              `${camera.sensor_height_m.toFixed(2)} m`
+            : 'Waiting for camera';
+        document.getElementById('sessionMetadata').textContent =
+          session && camera
+            ? `${session.scene_name} · ${camera.sensor_height_m.toFixed(2)} m · ` +
+              `${camera.hfov_degrees.toFixed(1)}° · yaw ${session.start_yaw_degrees.toFixed(1)}°`
+            : '—';
+        const serverManual = Boolean(state.manual_control && state.manual_control.enabled);
+        if (manualDesired !== null && serverManual === manualDesired) manualDesired = null;
+        if (manualDesired === null && serverManual !== manualEnabled) {
+          manualEnabled = serverManual;
+          if (!manualEnabled) manualKeys.clear();
+          updateManualUi();
+        }
+        drawMap();
+      } catch (error) {
+        connected = false;
+        document.getElementById('connectionDot').classList.remove('online');
+        document.getElementById('connectionText').textContent = 'Disconnected';
+      }
+    }
+
+    async function pollComparison() {
+      const status = document.getElementById('comparisonStatus');
+      try {
+        const response = await fetch('/api/model-comparison', {cache: 'no-store'});
+        const payload = await response.json();
+        if (!response.ok) {
+          status.textContent = payload.status || 'Waiting for inference';
+          return;
+        }
+        const models = payload.models || {};
+        const images = {
+          gt3p5m: models['3p5m'] && models['3p5m'].gt_png_base64,
+          pred3p5m: models['3p5m'] && models['3p5m'].predicted_png_base64,
+          gt5m: models['5m'] && models['5m'].gt_png_base64,
+          pred5m: models['5m'] && models['5m'].predicted_png_base64,
+          gt6p5m: models['6p5m'] && models['6p5m'].gt_png_base64,
+          pred6p5m: models['6p5m'] && models['6p5m'].predicted_png_base64
+        };
+        for (const [id, encoded] of Object.entries(images)) {
+          if (encoded) document.getElementById(id).src = `data:image/png;base64,${encoded}`;
+        }
+        const seconds = Number(payload.inference_seconds);
+        status.textContent =
+          `frame ${payload.last_frame_seq} · history ${payload.history_frame_count}/${payload.max_history}` +
+          (Number.isFinite(seconds) ? ` · ${seconds.toFixed(2)} s` : '');
+        const modelEntries = Object.entries(models);
+        if (modelEntries.length) {
+          const scales = modelEntries.map(([key, model]) =>
+            `${Number(model.extent_m).toFixed(1)} m scale ${Number(model.depth_scale).toFixed(3)}`
+          ).join(' · ');
+          document.getElementById('modelMetadata').textContent =
+            `${scales} · occupied 0 · unknown 112 · free 255`;
+        }
+      } catch (error) {
+        status.textContent = 'Comparison disconnected';
+      }
+    }
+
+    updateManualUi();
+    setInterval(pollState, 120);
+    setInterval(pollComparison, 500);
+    pollState();
+    pollComparison();
+  </script>
+</body>
+</html>
