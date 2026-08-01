@@ -1,9 +1,9 @@
-# OdinEye P2B — Two Experts + metric Scale Token
+# OdinEye P2B — Pixel Routing + Guessed Completion + Scale Token
 
 The active implementation is a from-scratch replacement for the former P1B
 occupancy objective. Frozen VGGT aggregation runs exactly once per RGB window.
-Independent Observed, Guessed and Routing paths consume the same frozen token
-memory, so expert losses do not update one another through a trainable adapter.
+Independent Guessed and Routing paths consume the same frozen token memory.
+There is no learned Observed occupancy decoder.
 
 Two strict variants are supported:
 
@@ -13,9 +13,15 @@ Two strict variants are supported:
   but no claim of epistemic confidence.
 
 Both variants retain the same RGB-only runtime contract, 512x512/6.5 m single
-BEV, 800x800/10 m merged BEV and metric Scale Token. Inside the FOV, GT hard
-routing separates directly observed free/first-hit surface cells from occluded
-completion. Outside the FOV remains unknown.
+BEV, 800x800/10 m merged BEV and metric Scale Token. The Routing decoder has
+an Observed Gate and a Surface Gate. The former learns GT masked-known versus
+masked-unknown; the latter learns GT masked-occupied versus masked-free while
+masked-unknown pixels are ignored. Their probabilities compose
+`observed_free`, `observed_surface`, and `guessed`. Only guessed pixels consume
+learned occupancy/evidence. Outside the FOV remains unknown.
+
+No ray bank or ray-derived loss is used. Both Gates use per-pixel BCE on the
+exact masked-BEV pixels, balanced across classes present in each sample.
 
 The new training entrypoint is:
 
@@ -26,8 +32,8 @@ python -m vggt_bev_method1.cli_train_p2b --config CONFIG.toml
 Checkpoint schemas are intentionally incompatible:
 
 ```text
-P2B-NLL: p2b-two-expert-evidential-ray-v1
-P2B-BCE: p2b-two-expert-bce-ray-v1
+P2B-NLL: p2b-masked-gates-evidential-v2
+P2B-BCE: p2b-masked-gates-bce-v2
 ```
 
 Legacy P1B modules remain in the repository only for historical comparison and
@@ -66,18 +72,22 @@ depth, intrinsics, extrinsics, confidence, or a point cloud.
 
 The output is:
 
+- per-BEV `routing_probability`: `[B,3,H,W]` ordered as observed-free,
+  observed-surface, guessed;
+- per-BEV `guessed`: occupied/free Beta evidence used only for completion;
 - `single_bev.fov_support_probability`: `[B,512,512]`;
 - `merged_bev.fov_support_probability`: `[B,800,800]`;
-- per-BEV `occupancy_probability` inside predicted support; outside is unknown;
+- per-BEV `occupancy_probability = P(surface) + P(guessed) ×
+  P(occupied|guessed)`; outside predicted support is unknown;
 - per-BEV `fov_complete_semantic` assembled as occupied `0`, unknown `112`,
-  free `255`, and `navigation_confidence = support × evidence confidence`;
-- per-BEV `evidence_confidence`, `epistemic_uncertainty`,
-  `occupancy_distribution_variance`, and occupied/free Beta evidence;
+  and free `255`;
+- per-BEV routing entropy, mixture variance and navigation confidence;
 - `scale.lambda_m_per_vggt`: one positive scalar per window;
 - optional `scale.log_variance` and `scale_std_m_per_vggt`.
 
-There is no sigmoid confidence head. Confidence is derived from Beta evidence
-as `1 - 2 / (alpha_occupied + beta_free)`.
+There is no separate confidence head. Completion uncertainty comes from Beta
+evidence, while routing uncertainty comes from the three-state distribution;
+the final mixture variance includes both sources.
 
 The existing simulator labels define a 6.5 m × 6.5 m latest-ego-centred grid:
 

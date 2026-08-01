@@ -14,7 +14,7 @@ from .p2b_probability import (
     ProbabilityModel,
     compose_semantic,
     decode_binary_prediction,
-    fuse_experts,
+    fuse_pixel_routing,
 )
 
 
@@ -111,54 +111,62 @@ class DenseMetricQueryDecoder(nn.Module):
         return raw
 
 
-class TwoExpertBEVDecoder(nn.Module):
-    """Independent observed, guessed and routing decoders for one BEV grid."""
+class PixelRoutedBEVDecoder(nn.Module):
+    """Three-state pixel routing plus one learned completion decoder."""
 
     def __init__(self, *, probability_model: ProbabilityModel, **arguments) -> None:
         super().__init__()
         self.probability_model = probability_model
         expert_channels = 2 if probability_model == "evidential" else 1
-        self.observed = DenseMetricQueryDecoder(
-            output_channels=expert_channels,
-            **arguments,
-        )
         self.guessed = DenseMetricQueryDecoder(
             output_channels=expert_channels,
             **arguments,
         )
-        self.routing = DenseMetricQueryDecoder(output_channels=2, **arguments)
-        self.output_size = self.observed.output_size
-        self.extent_m = self.observed.extent_m
+        # Observed Gate, Surface Gate, and FOV Support.
+        self.routing = DenseMetricQueryDecoder(output_channels=3, **arguments)
+        self.output_size = self.guessed.output_size
+        self.extent_m = self.guessed.extent_m
 
     def forward(
         self,
-        observed_pyramid: list[torch.Tensor],
         guessed_pyramid: list[torch.Tensor],
         routing_pyramid: list[torch.Tensor],
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
-        observed = decode_binary_prediction(
-            self.observed(observed_pyramid), self.probability_model
-        )
         guessed = decode_binary_prediction(
             self.guessed(guessed_pyramid), self.probability_model
         )
         routing_raw = self.routing(routing_pyramid).float()
-        gate_logit = routing_raw[:, 0]
-        support_logit = routing_raw[:, 1]
-        gate_probability = torch.sigmoid(gate_logit)
+        observed_gate_logit = routing_raw[:, 0]
+        surface_gate_logit = routing_raw[:, 1]
+        support_logit = routing_raw[:, 2]
+        observed_gate_probability = torch.sigmoid(observed_gate_logit)
+        surface_gate_probability = torch.sigmoid(surface_gate_logit)
+        routing_probability = torch.stack(
+            (
+                observed_gate_probability * (1.0 - surface_gate_probability),
+                observed_gate_probability * surface_gate_probability,
+                1.0 - observed_gate_probability,
+            ),
+            dim=1,
+        )
         support_probability = torch.sigmoid(support_logit)
-        fused = fuse_experts(
-            observed,
+        fused = fuse_pixel_routing(
+            routing_probability,
             guessed,
-            gate_probability,
             support_probability,
             self.probability_model,
         )
         return {
-            "observed": observed,
             "guessed": guessed,
-            "gate_logit": gate_logit,
-            "gate_probability": gate_probability,
+            "routing_probability": routing_probability,
+            "routing_class": routing_probability.argmax(dim=1),
+            "observed_gate_logit": observed_gate_logit,
+            "observed_gate_probability": observed_gate_probability,
+            "surface_gate_logit": surface_gate_logit,
+            "surface_gate_probability": surface_gate_probability,
+            "observed_free_probability": routing_probability[:, 0],
+            "observed_surface_probability": routing_probability[:, 1],
+            "guessed_region_probability": routing_probability[:, 2],
             "fov_support_logit": support_logit,
             "fov_support_probability": support_probability,
             "fused": fused,
@@ -171,7 +179,7 @@ class TwoExpertBEVDecoder(nn.Module):
 
 
 class P2BHead(nn.Module):
-    """Two conditional BEV experts, routing/support and the metric Scale Token."""
+    """Pixel routing, guessed completion and the independent metric Scale Token."""
 
     def __init__(
         self,
@@ -206,12 +214,8 @@ class P2BHead(nn.Module):
             hidden_dim,
             spatial_scales,
         )
-        # Trainable paths are deliberately independent. Only the frozen raw
-        # VGGT tokens are shared, so task losses cannot silently update the
-        # other expert through a common adapter.
-        self.observed_token_projector = MultiScaleTokenProjector(
-            *projector_arguments
-        )
+        # Routing and completion share only frozen raw VGGT tokens. Their
+        # trainable projectors/decoders remain independent.
         self.guessed_token_projector = MultiScaleTokenProjector(
             *projector_arguments
         )
@@ -231,14 +235,14 @@ class P2BHead(nn.Module):
             deformable_samples=deformable_samples,
             cross_query_chunk_size=cross_query_chunk_size,
         )
-        self.single_bev_decoder = TwoExpertBEVDecoder(
+        self.single_bev_decoder = PixelRoutedBEVDecoder(
             probability_model=probability_model,
             latent_size=single_latent_bev_size,
             output_size=single_output_size,
             extent_m=single_bev_extent_m,
             **common,
         )
-        self.merged_bev_decoder = TwoExpertBEVDecoder(
+        self.merged_bev_decoder = PixelRoutedBEVDecoder(
             probability_model=probability_model,
             latent_size=merged_latent_bev_size,
             output_size=merged_output_size,
@@ -256,7 +260,6 @@ class P2BHead(nn.Module):
         tokens = extraction["tokens"]
         grid = extraction["patch_grid"]
         return (
-            self.observed_token_projector(tokens, grid),
             self.guessed_token_projector(tokens, grid),
             self.routing_token_projector(tokens, grid),
         )
@@ -273,16 +276,15 @@ class P2BHead(nn.Module):
             raise ValueError(f"unknown BEV branches: {sorted(unknown)}")
         output: dict = {}
         if enabled_bev_branches:
-            observed, guessed, routing = self._pyramids(extraction)
+            guessed, routing = self._pyramids(extraction)
             if "single" in enabled_bev_branches:
                 output["single_bev"] = self.single_bev_decoder(
-                    [level[:, -1:] for level in observed],
                     [level[:, -1:] for level in guessed],
                     [level[:, -1:] for level in routing],
                 )
             if "merged" in enabled_bev_branches:
                 output["merged_bev"] = self.merged_bev_decoder(
-                    observed, guessed, routing
+                    guessed, routing
                 )
         if include_scale:
             scale_pyramid = self.scale_token_projector(

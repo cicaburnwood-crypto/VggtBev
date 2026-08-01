@@ -52,10 +52,10 @@ from vggt_bev_method1.training_state import (
     StratifiedValidationSampler,
 )
 
-FORMAT_VERSION = 18
+FORMAT_VERSION = 19
 SCHEMAS = {
-    "evidential": "p2b-two-expert-evidential-ray-v1",
-    "bce": "p2b-two-expert-bce-ray-v1",
+    "evidential": "p2b-masked-gates-evidential-v2",
+    "bce": "p2b-masked-gates-bce-v2",
 }
 
 
@@ -110,7 +110,6 @@ def _set_stage(model: P2BSystem, stage: str, enabled: tuple[str, ...]) -> None:
         parameter.requires_grad = False
     if stage in ("bev_only", "joint"):
         modules = [
-            head.observed_token_projector,
             head.guessed_token_projector,
             head.routing_token_projector,
         ] + [getattr(head, f"{branch}_bev_decoder") for branch in enabled]
@@ -125,17 +124,12 @@ def _set_stage(model: P2BSystem, stage: str, enabled: tuple[str, ...]) -> None:
 
 def _loss_weights(training: dict) -> P2BLossWeights:
     return P2BLossWeights(
-        ray_sequence=float(training.get("ray_sequence_weight", 1.0)),
-        first_hit=float(training.get("first_hit_weight", 1.0)),
-        first_hit_distance=float(training.get("first_hit_distance_weight", 0.25)),
-        surface_continuity=float(training.get("surface_continuity_weight", 0.05)),
+        observed_gate_pixel=float(training.get("observed_gate_pixel_weight", 1.0)),
+        surface_gate_pixel=float(training.get("surface_gate_pixel_weight", 1.0)),
         guessed_pixel=float(training.get("guessed_pixel_weight", 1.0)),
         wrong_evidence_kl=float(training.get("wrong_evidence_kl_weight", 0.0)),
-        gate_bce=float(training.get("gate_bce_weight", 1.0)),
-        gate_monotonic=float(training.get("gate_monotonic_weight", 0.1)),
         support_bce=float(training.get("support_bce_weight", 0.5)),
         support_dice=float(training.get("support_dice_weight", 0.5)),
-        fusion_gate=float(training.get("fusion_gate_weight", 0.0)),
     )
 
 
@@ -153,7 +147,10 @@ def step_losses(
     branches = _enabled_bev_branches(training)
     probability_model = str(config["model"]["probability_model"])
     if branches and f"{branches[0]}_bev" in prediction:
-        zero = prediction[f"{branches[0]}_bev"]["gate_logit"].sum() * 0.0
+        zero = (
+            prediction[f"{branches[0]}_bev"]["observed_gate_logit"].sum()
+            * 0.0
+        )
     else:
         zero = prediction["scale"]["log_lambda_m_per_vggt"].sum() * 0.0
     values: dict[str, torch.Tensor] = {}
@@ -209,6 +206,8 @@ def checkpoint_contract(config: dict, manifest_sha256: str) -> dict:
         "probability_model": probability_model,
         "manifest_sha256": manifest_sha256,
         "runtime_inputs": ["rgb_window"],
+        "bev_architecture": "masked-observed-and-surface-gates-plus-completion",
+        "routing_classes": ["observed_free", "observed_surface", "guessed"],
         "single_output": [512, 512, 6.5],
         "merged_output": [800, 800, 10.0],
     }
@@ -493,6 +492,8 @@ def main() -> None:
     )
     use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
     model.train()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     started = time.monotonic()
     stop = False
     for epoch in range(start_epoch, int(training["epochs"])):
@@ -537,6 +538,17 @@ def main() -> None:
             scheduler.step()
             global_step += 1
             if primary and global_step % int(training["log_every_steps"]) == 0:
+                memory = {}
+                if device.type == "cuda":
+                    gib = float(1024**3)
+                    memory = {
+                        "cuda_allocated_gib": torch.cuda.memory_allocated(device) / gib,
+                        "cuda_reserved_gib": torch.cuda.memory_reserved(device) / gib,
+                        "cuda_peak_allocated_gib": torch.cuda.max_memory_allocated(device)
+                        / gib,
+                        "cuda_peak_reserved_gib": torch.cuda.max_memory_reserved(device)
+                        / gib,
+                    }
                 print(
                     json.dumps(
                         {
@@ -545,6 +557,7 @@ def main() -> None:
                             "batch_seconds": time.monotonic() - batch_started,
                             "elapsed_seconds": time.monotonic() - started,
                             "learning_rate": scheduler.get_last_lr()[0],
+                            **memory,
                             **{key: float(value.detach().cpu()) for key, value in values.items()},
                         }
                     ),

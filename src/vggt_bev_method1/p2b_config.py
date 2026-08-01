@@ -79,6 +79,14 @@ def validate_p2b_config(config: dict[str, Any]) -> None:
         "confidence_calibration_weight",
         "observation_relation_weight",
         "surface_tolerance_latent_cell_fraction",
+        "ray_sequence_weight",
+        "first_hit_weight",
+        "first_hit_distance_weight",
+        "surface_continuity_weight",
+        "gate_bce_weight",
+        "gate_monotonic_weight",
+        "fusion_gate_weight",
+        "routing_pixel_weight",
     }.intersection(training)
     if forbidden:
         raise ValueError(f"P2B forbids legacy loss fields: {sorted(forbidden)}")
@@ -118,17 +126,12 @@ def validate_p2b_config(config: dict[str, Any]) -> None:
         "training",
     )
     for name in (
-        "ray_sequence_weight",
-        "first_hit_weight",
-        "first_hit_distance_weight",
-        "surface_continuity_weight",
+        "observed_gate_pixel_weight",
+        "surface_gate_pixel_weight",
         "guessed_pixel_weight",
         "wrong_evidence_kl_weight",
-        "gate_bce_weight",
-        "gate_monotonic_weight",
         "support_bce_weight",
         "support_dice_weight",
-        "fusion_gate_weight",
         "single_task_weight",
         "merged_task_weight",
     ):

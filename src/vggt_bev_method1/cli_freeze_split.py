@@ -4,8 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
 from vggt_bev_method1.config import load_config
 from vggt_bev_method1.data.manifest import create_split_manifest
+from vggt_bev_method1.p2b_config import load_p2b_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,9 +46,19 @@ def active_dataset_writers(dataset_root: str | Path) -> list[dict[str, str | int
     return writers
 
 
+def load_split_config(path: str | Path) -> dict:
+    resolved = Path(path).expanduser().resolve()
+    with resolved.open("rb") as stream:
+        raw = tomllib.load(stream)
+    pipeline = str(raw.get("training", {}).get("pipeline", ""))
+    if pipeline in ("P2B-NLL", "P2B-BCE"):
+        return load_p2b_config(resolved)
+    return load_config(resolved)
+
+
 def main() -> None:
     args = parse_args()
-    config = load_config(args.config)
+    config = load_split_config(args.config)
     data = config["data"]
     writers = active_dataset_writers(data["root"])
     allow_completed_snapshot = bool(

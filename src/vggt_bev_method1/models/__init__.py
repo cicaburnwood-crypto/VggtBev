@@ -15,8 +15,8 @@ from .metric_scale import (
     metric_scale_metrics,
     vggt_confidence_probability,
 )
-from .p2b import DenseMetricQueryDecoder, P2BHead, P2BSystem, TwoExpertBEVDecoder
-from .p2b_probability import ProbabilityModel, fuse_experts
+from .p2b import DenseMetricQueryDecoder, P2BHead, P2BSystem, PixelRoutedBEVDecoder
+from .p2b_probability import ProbabilityModel, fuse_pixel_routing
 from .vggt_adapter import LiveVGGTOmegaAdapter
 
 __all__ = [
@@ -38,6 +38,6 @@ __all__ = [
     "P2BHead",
     "P2BSystem",
     "ProbabilityModel",
-    "TwoExpertBEVDecoder",
-    "fuse_experts",
+    "PixelRoutedBEVDecoder",
+    "fuse_pixel_routing",
 ]

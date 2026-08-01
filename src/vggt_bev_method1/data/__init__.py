@@ -17,8 +17,11 @@ from .manifest import (
 from .preprocess import RGBResizePad
 from .p2b_targets import (
     P2BRegionMasks,
-    PackedRayBank,
-    build_packed_ray_bank,
+    ROUTING_CLASS_COUNT,
+    ROUTING_CLASS_NAMES,
+    ROUTING_GUESSED,
+    ROUTING_OBSERVED_FREE,
+    ROUTING_OBSERVED_SURFACE,
     p2b_region_masks,
 )
 
@@ -35,7 +38,10 @@ __all__ = [
     "local_fov_polygon",
     "split_sessions_by_scene",
     "P2BRegionMasks",
-    "PackedRayBank",
-    "build_packed_ray_bank",
+    "ROUTING_CLASS_COUNT",
+    "ROUTING_CLASS_NAMES",
+    "ROUTING_GUESSED",
+    "ROUTING_OBSERVED_FREE",
+    "ROUTING_OBSERVED_SURFACE",
     "p2b_region_masks",
 ]

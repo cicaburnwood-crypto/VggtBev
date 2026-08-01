@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "odineye-p2b"
-version = "3.0.0"
+version = "3.1.0"
 description = "Two-expert FOV-complete BEVs with NLL/BCE variants and metric scale"
 requires-python = ">=3.10"
 dependencies = [

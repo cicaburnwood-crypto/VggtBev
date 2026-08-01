@@ -48,44 +48,56 @@ def decode_binary_prediction(
     raise ValueError(f"unsupported probability model: {probability_model}")
 
 
-def fuse_experts(
-    observed: dict[str, torch.Tensor],
+def fuse_pixel_routing(
+    routing_probability: torch.Tensor,
     guessed: dict[str, torch.Tensor],
-    gate_probability: torch.Tensor,
     support_probability: torch.Tensor,
     probability_model: ProbabilityModel,
 ) -> dict[str, torch.Tensor]:
-    """Fuse conditional experts and retain disagreement as uncertainty."""
+    """Fuse deterministic routing states with the learned guessed occupancy."""
 
-    observed_mean = observed["occupancy_probability"].float()
+    if routing_probability.ndim != 4 or routing_probability.shape[1] != 3:
+        raise ValueError("routing probability must be Bx3xHxW")
+    observed_free = routing_probability[:, 0].float()
+    observed_surface = routing_probability[:, 1].float()
+    guessed_region = routing_probability[:, 2].float()
     guessed_mean = guessed["occupancy_probability"].float()
-    gate = gate_probability.float().clamp(0.0, 1.0)
     support = support_probability.float().clamp(0.0, 1.0)
     if not (
-        observed_mean.shape
+        observed_free.shape
+        == observed_surface.shape
+        == guessed_region.shape
         == guessed_mean.shape
-        == gate.shape
         == support.shape
     ):
-        raise ValueError("expert, gate and support raster shapes must match")
+        raise ValueError("routing, completion and support raster shapes must match")
 
-    probability = gate * observed_mean + (1.0 - gate) * guessed_mean
-    disagreement = gate * (1.0 - gate) * (observed_mean - guessed_mean).square()
+    probability = observed_surface + guessed_region * guessed_mean
     classification_confidence = (2.0 * probability - 1.0).abs()
+    routing_entropy = -(
+        routing_probability.float().clamp_min(1e-8).log()
+        * routing_probability.float()
+    ).sum(dim=1) / torch.log(
+        torch.tensor(3.0, device=probability.device, dtype=probability.dtype)
+    )
+    routing_confidence = (1.0 - routing_entropy).clamp(0.0, 1.0)
     output = {
         "occupancy_probability": probability,
         "free_probability": 1.0 - probability,
         "unknown_probability": 1.0 - support,
         "classification_confidence": classification_confidence,
-        "expert_disagreement": disagreement,
+        "routing_entropy": routing_entropy,
+        "routing_confidence": routing_confidence,
+        "observed_free_probability": observed_free,
+        "observed_surface_probability": observed_surface,
+        "guessed_region_probability": guessed_region,
     }
 
     if probability_model == "evidential":
-        observed_variance = observed["occupancy_distribution_variance"].float()
         guessed_variance = guessed["occupancy_distribution_variance"].float()
-        mixture_variance = gate * (
-            observed_variance + (observed_mean - probability).square()
-        ) + (1.0 - gate) * (
+        mixture_variance = observed_free * probability.square() + observed_surface * (
+            1.0 - probability
+        ).square() + guessed_region * (
             guessed_variance + (guessed_mean - probability).square()
         )
         distribution_confidence = (1.0 - 4.0 * mixture_variance).clamp(0.0, 1.0)
@@ -94,15 +106,18 @@ def fuse_experts(
                 "occupancy_distribution_variance": mixture_variance,
                 "distribution_confidence": distribution_confidence,
                 "mixture_uncertainty": 1.0 - distribution_confidence,
+                "completion_epistemic_uncertainty": guessed_region
+                * guessed["epistemic_uncertainty"].float(),
                 "navigation_confidence": (
                     support * classification_confidence * distribution_confidence
                 ),
             }
         )
     elif probability_model == "bce":
-        # This is classification certainty, not epistemic confidence. Keep the
-        # disagreement channel explicit so downstream code cannot confuse them.
-        output["navigation_confidence"] = support * classification_confidence
+        # This is classification certainty, not epistemic confidence.
+        output["navigation_confidence"] = (
+            support * classification_confidence * routing_confidence
+        )
     else:
         raise ValueError(f"unsupported probability model: {probability_model}")
     return output
