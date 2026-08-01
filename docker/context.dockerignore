@@ -1,0 +1,13 @@
+*
+!vggt_omega/
+!vggt_omega/**
+!model.pt
+!method1/
+!method1/src/
+!method1/src/**
+!method1/configs/
+!method1/configs/**
+!method1/docker/
+!method1/docker/entrypoint.sh
+!testdata/
+!testdata/**

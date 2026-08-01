@@ -1,0 +1,62 @@
+[data]
+root = "/opt/vggtbev/testdata"
+supervision = "joint"
+coordinate_mode = "vggt_scene_radius_normalized"
+single_target_extent_m = 6.5
+merged_target_extent_m = 10.0
+image_height = 384
+image_width = 512
+sample_stride = 1
+minimum_history = 1
+maximum_history = 5
+validation_fraction = 0.25
+split_seed = 17
+split_manifest = "/opt/vggtbev/manifests/docker_4scene.json"
+
+[model]
+vggt_source = "/opt/vggt"
+checkpoint = "/opt/vggt/checkpoints/VGGT-Omega-1B-512/model.pt"
+patch_size = 16
+cached_layers = [4, 11, 17, 23]
+spatial_scales = [4.0, 2.0, 1.0, 0.5]
+vggt_token_dim = 2048
+hidden_dim = 64
+geometry_cue_dim = 14
+attention_heads = 8
+decoder_layers = 2
+self_attention_mode = "linear"
+cross_attention_mode = "deformable"
+deformable_samples = 4
+cross_query_chunk_size = 8192
+query_parameter_chunk_size = 32768
+single_output_size = 512
+merged_output_size = 800
+gradient_checkpointing = true
+
+[training]
+device = "cuda"
+required_cuda_devices = 1
+distributed_backend = "nccl"
+require_same_numa = true
+nccl_p2p_level = "PHB"
+ddp_bucket_cap_mb = 25
+nccl_timeout_seconds = 300
+epochs = 1
+batch_size = 1
+num_workers = 0
+learning_rate = 0.0001
+weight_decay = 0.0001
+occupancy_weight = 1.0
+observation_weight = 0.5
+dice_weight = 0.25
+single_task_weight = 0.5
+merged_task_weight = 0.5
+observed_task_weight = 0.5
+complete_task_weight = 0.5
+seed = 17
+log_every_steps = 1
+checkpoint_every_steps = 100
+validation_batches = 4
+geometry_warmup_epochs = 0
+geometry_ramp_epochs = 0
+output_dir = "/workspace/runs/docker_4scene_single"

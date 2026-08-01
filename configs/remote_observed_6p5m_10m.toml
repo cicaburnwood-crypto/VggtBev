@@ -1,0 +1,53 @@
+[data]
+root = "/data/project/VGGT_DATA/data_build_unlimited"
+supervision = "observed"
+coordinate_mode = "vggt_scene_radius_normalized"
+single_target_extent_m = 6.5
+merged_target_extent_m = 10.0
+image_height = 384
+image_width = 512
+sample_stride = 1
+minimum_history = 1
+maximum_history = 34
+validation_fraction = 0.10
+split_seed = 17
+split_manifest = "/data/project/vggt/VGGTBEV_Method1/manifests/data_build_unlimited_method1_v4_disk7t.json"
+
+[model]
+vggt_source = "/data/project/vggt"
+checkpoint = "/data/project/vggt/checkpoints/VGGT-Omega-1B-512/model.pt"
+patch_size = 16
+cached_layers = [4, 11, 17, 23]
+spatial_scales = [4.0, 2.0, 1.0, 0.5]
+vggt_token_dim = 2048
+hidden_dim = 64
+geometry_cue_dim = 14
+attention_heads = 8
+decoder_layers = 2
+self_attention_mode = "linear"
+cross_attention_mode = "deformable"
+deformable_samples = 4
+cross_query_chunk_size = 8192
+single_output_size = 512
+merged_output_size = 800
+gradient_checkpointing = true
+
+[training]
+device = "cuda"
+epochs = 10
+batch_size = 1
+num_workers = 4
+learning_rate = 0.0001
+weight_decay = 0.0001
+occupancy_weight = 1.0
+observation_weight = 0.5
+dice_weight = 0.25
+single_task_weight = 0.5
+merged_task_weight = 0.5
+seed = 17
+log_every_steps = 10
+checkpoint_every_steps = 500
+validation_batches = 200
+geometry_warmup_epochs = 1
+geometry_ramp_epochs = 2
+output_dir = "/data/project/vggt/VGGTBEV_Method1/runs/data_build_unlimited_observed_6p5m_10m_pdf_v4"
