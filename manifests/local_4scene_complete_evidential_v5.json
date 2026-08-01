@@ -1,0 +1,49 @@
+{
+  "format_version": 5,
+  "created_at_utc": "2026-07-29T13:51:07.807937+00:00",
+  "dataset_root": "/home/user/Project/VGGTBEV_Method1_P1B/docker/testdata/data_build_4scenes",
+  "source_session_count": 4,
+  "maximum_sessions": null,
+  "selection_order": "lexicographic session key, first N before scene split",
+  "validation_fraction": 0.25,
+  "split_seed": 17,
+  "session_count": 4,
+  "scene_count": 4,
+  "train": [
+    {
+      "key": "GPU1-1/session_001325_hm3d_00002-FxCkHAfgh7A",
+      "scene_key": "hm3d:00002-FxCkHAfgh7A",
+      "frame_count": 5,
+      "metadata_sha256": "c2603c297797b8f23136026e3e6bab1d58bc0e02ff65028d813b8df888176540",
+      "artifact_inventory_sha256": "0dc91815a95d781642b1652e01cae15cde5357730184d75e7dc5965cf12af3af",
+      "artifact_count": 30
+    },
+    {
+      "key": "GPU2-3/session_000402_hm3d_00003-NtVbfPCkBFy",
+      "scene_key": "hm3d:00003-NtVbfPCkBFy",
+      "frame_count": 5,
+      "metadata_sha256": "e592dac5e49156f750279f2c30098c51a434325591fee1580686b50799055ba3",
+      "artifact_inventory_sha256": "ccd33d633a1a41ed35fc8f7cdebf4db259be62e69768af3e40824acac06c2c13",
+      "artifact_count": 30
+    },
+    {
+      "key": "GPU2-4/session_000710_hm3d_00001-UVdNNRcVyV1",
+      "scene_key": "hm3d:00001-UVdNNRcVyV1",
+      "frame_count": 5,
+      "metadata_sha256": "6a337b81a50b5eee83a37a338a136209a1f8574217c1087e3ec2311119da94f8",
+      "artifact_inventory_sha256": "076bf2eca2367a7d412aae94ca714d2f38a2882207539d2d83a2daedd7856505",
+      "artifact_count": 30
+    }
+  ],
+  "validation": [
+    {
+      "key": "GPU1-5/session_001043_hm3d_00000-kfPV7w3FaU5",
+      "scene_key": "hm3d:00000-kfPV7w3FaU5",
+      "frame_count": 5,
+      "metadata_sha256": "5e8b7a320bd295e3b51c7194fac9584f0ffd99fa406a40ec19a54b7bddfdbc5f",
+      "artifact_inventory_sha256": "48e4ca43fb464046c9ed0fb2f0dbd5c909be8c7e3e4ec26bf33ae633dc254693",
+      "artifact_count": 30
+    }
+  ],
+  "content_sha256": "375b951d716b2adebbacd4a8ec190ff908eff21a36febc9c7d7b6a900d1d070f"
+}

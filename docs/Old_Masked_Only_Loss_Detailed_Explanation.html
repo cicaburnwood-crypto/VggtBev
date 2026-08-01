@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Method1 老版本 Masked-only Loss 详细说明</title>
+  <style>
+    @page { size: A4; margin: 17mm 16mm 18mm 16mm; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: #17202a;
+      font-family: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+      font-size: 10.2pt;
+      line-height: 1.58;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    h1, h2, h3 { color: #102a43; page-break-after: avoid; }
+    h1 { font-size: 24pt; margin: 0 0 8mm; line-height: 1.25; }
+    h2 {
+      font-size: 16pt;
+      margin: 7mm 0 3mm;
+      padding-bottom: 1.6mm;
+      border-bottom: 1.5px solid #9fb3c8;
+    }
+    h3 { font-size: 12pt; margin: 5mm 0 2mm; }
+    p { margin: 1.5mm 0 3mm; }
+    ul, ol { margin: 1mm 0 3mm 6mm; padding-left: 5mm; }
+    li { margin: 1mm 0; }
+    code, pre {
+      font-family: "JetBrains Mono", "Noto Sans Mono CJK SC", monospace;
+    }
+    code { color: #7c2d12; background: #fff7ed; padding: 0.1em 0.25em; border-radius: 3px; }
+    pre {
+      white-space: pre-wrap;
+      background: #102a43;
+      color: #eef6ff;
+      border-radius: 6px;
+      padding: 4mm;
+      font-size: 8.6pt;
+      line-height: 1.45;
+      page-break-inside: avoid;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 3mm 0 5mm; page-break-inside: avoid; }
+    th, td { border: 1px solid #bcccdc; padding: 2.2mm 2.5mm; vertical-align: top; }
+    th { background: #d9eaf7; color: #102a43; text-align: left; }
+    tr:nth-child(even) td { background: #f7fafc; }
+    .cover {
+      min-height: 255mm;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      page-break-after: always;
+    }
+    .kicker { color: #1570a6; font-weight: 700; letter-spacing: 0.08em; margin-bottom: 4mm; }
+    .subtitle { font-size: 14pt; color: #486581; margin-bottom: 12mm; }
+    .meta { border-left: 4px solid #2f80b7; padding: 3mm 5mm; background: #eef7fc; }
+    .summary {
+      margin: 7mm 0;
+      padding: 4mm 5mm;
+      background: #e8f5ee;
+      border-left: 4px solid #2f855a;
+      border-radius: 4px;
+    }
+    .warning {
+      margin: 4mm 0;
+      padding: 3.5mm 4.5mm;
+      background: #fff8e6;
+      border-left: 4px solid #d69e2e;
+      border-radius: 4px;
+    }
+    .equation {
+      font-family: "STIX Two Text", "Noto Serif CJK SC", serif;
+      font-size: 11.5pt;
+      text-align: center;
+      margin: 4mm 0;
+      padding: 3mm;
+      background: #f5f8fb;
+      border: 1px solid #d9e2ec;
+      border-radius: 5px;
+      page-break-inside: avoid;
+    }
+    .diagram {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 9pt;
+      line-height: 1.45;
+      white-space: pre;
+      padding: 4mm;
+      margin: 3mm 0 5mm;
+      background: #f0f7ff;
+      border: 1px solid #9fb3c8;
+      border-radius: 6px;
+      overflow: hidden;
+      page-break-inside: avoid;
+    }
+    .page-break { page-break-before: always; }
+    .small { font-size: 8.7pt; color: #526d82; }
+    .tag { display: inline-block; background: #d9eaf7; color: #145374; border-radius: 12px; padding: 0.6mm 2.5mm; margin-right: 1.5mm; font-size: 8.5pt; }
+    .footer-note { margin-top: 8mm; padding-top: 3mm; border-top: 1px solid #bcccdc; color: #627d98; font-size: 8.5pt; }
+  </style>
+</head>
+<body>
+  <section class="cover">
+    <div class="kicker">VGGTBEV · METHOD 1 HISTORICAL LOSS NOTE</div>
+    <h1>老版本 Masked-only BEV Loss<br>详细技术说明</h1>
+    <div class="subtitle">严格只监督 masked/observed BEV，不包含未观测区域补全</div>
+    <div>
+      <span class="tag">single 6.5×6.5</span>
+      <span class="tag">merged 10×10</span>
+      <span class="tag">occupancy + observation mask</span>
+      <span class="tag">no completion</span>
+    </div>
+    <div class="summary">
+      <strong>核心结论：</strong>该版本在 occupancy 分支中只对 masked GT 中非 unknown 的像素计算 BCE 与 occupied Dice；另外使用全图 observation BCE 学习哪里是 known/observed。unknown 区域不产生 occupancy 梯度，也没有 complete GT、guessed-region NLL、completion Dice 或补全置信度监督。
+    </div>
+    <div class="meta">
+      <div><strong>历史配置：</strong><code>configs/remote_observed_6p5m_10m.toml</code></div>
+      <div><strong>配置开关：</strong><code>supervision = "observed"</code></div>
+      <div><strong>实现入口：</strong><code>branch_loss()</code> / <code>dual_method1_loss()</code></div>
+      <div><strong>代码位置：</strong><code>VGGTBEV_Method1/src/vggt_bev_method1/losses.py</code></div>
+      <div><strong>文档生成日期：</strong>2026-08-01</div>
+    </div>
+  </section>
+
+  <h2>1. 版本识别与范围</h2>
+  <p>本说明针对 P1A/P1B 分离之前保留下来的严格 masked-only 训练路径。它与当前 P1B 的 <code>train_guessed_completion=false</code> 消融实验不同：</p>
+  <table>
+    <tr><th>项目</th><th>严格老版本 masked-only</th><th>当前 P1B direct-only 消融</th></tr>
+    <tr><td>BEV 内容 target</td><td>loss 直接接收 masked single/merged target</td><td>仍构造 FOV-complete target，但令 guessed 梯度为 0</td></tr>
+    <tr><td>预测参数化</td><td>两个标量 logit：occupancy 与 observed</td><td>Beta evidence + FOV support logit</td></tr>
+    <tr><td>complete 内容监督</td><td>完全没有</td><td>内容梯度关闭，但 complete tensor 仍用于 FOV/support 契约</td></tr>
+    <tr><td>置信度</td><td>无 evidential confidence；observed probability 不是正确率置信度</td><td>有 Beta evidence confidence</td></tr>
+  </table>
+  <div class="warning"><strong>证据边界：</strong>工程目录本身不是 Git repository，因此无法给出 commit hash；但历史配置、loss 函数、数据分支与单元测试仍完整保留，可以恢复其精确数学行为。</div>
+
+  <h2>2. 训练数据与标签语义</h2>
+  <p>当 <code>supervision="observed"</code> 时，dataset 只把下列两个 raster 送入该 loss：</p>
+  <ul>
+    <li>single：<code>bev_6p5m/masked/frame_xxxxxx.png</code></li>
+    <li>merged：<code>bev_6p5m/merged_masked_10m/frame_xxxxxx.png</code></li>
+  </ul>
+  <table>
+    <tr><th>像素值</th><th>类别</th><th>在 loss 中的作用</th></tr>
+    <tr><td>0</td><td>occupied</td><td>known 像素；occupancy target = 1</td></tr>
+    <tr><td>112</td><td>unknown</td><td>occupancy loss 忽略；observation target = 0</td></tr>
+    <tr><td>255</td><td>free</td><td>known 像素；occupancy target = 0</td></tr>
+  </table>
+  <p>single 目标覆盖 6.5×6.5 的 ego-centric 区域；merged 目标覆盖 10×10 的 latest-ego 区域。两者都保持 forward image-up。这里的 masked 表示：只保留直接观测到的 free/occupied，未观测部分设为 unknown。</p>
+
+  <h2>3. 模型输出契约</h2>
+  <p>single 与 merged decoder 各自输出两张同分辨率的实数图：</p>
+  <table>
+    <tr><th>输出</th><th>符号</th><th>经过 sigmoid 后的含义</th></tr>
+    <tr><td><code>occupancy_logit</code></td><td>o<sub>i</sub></td><td>p<sub>i</sub>=σ(o<sub>i</sub>)，在像素 i 为 occupied 的概率</td></tr>
+    <tr><td><code>observed_logit</code></td><td>a<sub>i</sub></td><td>q<sub>i</sub>=σ(a<sub>i</sub>)，像素 i 属于 known/observed 区域的概率</td></tr>
+  </table>
+  <div class="diagram">RGB frame/window
+      │
+      ▼
+Frozen VGGT feature extraction
+      │
+      ▼
+Shared token projector
+      ├──────────────────────────────┐
+      ▼                              ▼
+Single decoder                  Merged decoder
+      │                              │
+      ├─ occupancy_logit             ├─ occupancy_logit
+      └─ observed_logit              └─ observed_logit
+      │                              │
+masked single GT                masked merged GT
+      └────────────── loss ──────────┘
+
+不存在 complete GT → completion loss 路径</div>
+
+  <h2 class="page-break">4. 数学定义</h2>
+  <p>对一个分支 b（single 或 merged），令像素集合为 Ω，masked target 为 Y<sub>i</sub>。定义：</p>
+  <div class="equation">
+    m<sub>i</sub> = 𝟙[Y<sub>i</sub> ≠ unknown]，&nbsp;
+    y<sub>i</sub> = 𝟙[Y<sub>i</sub> = occupied]，&nbsp;
+    p<sub>i</sub> = σ(o<sub>i</sub>)，&nbsp;
+    q<sub>i</sub> = σ(a<sub>i</sub>)
+  </div>
+  <p>m<sub>i</sub> 是 observation/known mask；y<sub>i</sub> 是 occupied 二值标签。只有 m<sub>i</sub>=1 的像素拥有 occupancy 真值。</p>
+
+  <h3>4.1 Masked occupancy BCE</h3>
+  <div class="equation">
+    L<sub>occ</sub> = − 1/|M| · Σ<sub>i∈M</sub>
+    [ y<sub>i</sub> log p<sub>i</sub> + (1−y<sub>i</sub>) log(1−p<sub>i</sub>) ]
+  </div>
+  <p>其中 M={i | m<sub>i</sub>=1}。unknown 像素不进入求和，所以无论模型在 unknown 区域把 occupancy logit 改成什么值，都不会改变 L<sub>occ</sub>。如果整个 target 没有 known 像素，代码返回一个与图相连但数值为 0 的 loss。</p>
+
+  <h3>4.2 Observation-mask BCE</h3>
+  <div class="equation">
+    L<sub>obs</sub> = − 1/|Ω| · Σ<sub>i∈Ω</sub>
+    [ m<sub>i</sub> log q<sub>i</sub> + (1−m<sub>i</sub>) log(1−q<sub>i</sub>) ]
+  </div>
+  <p>这个损失覆盖全图，负责学习“哪些位置应当输出 known”。因此模型可以在 runtime 将 occupancy 结果裁到其预测的 observed 区域。它不是 occupancy confidence，也不表示预测是否正确。</p>
+
+  <h3>4.3 Occupied Dice</h3>
+  <div class="equation">
+    L<sub>dice</sub> = 1 −
+    [2Σ<sub>i∈M</sub>p<sub>i</sub>y<sub>i</sub> + 1] /
+    [Σ<sub>i∈M</sub>p<sub>i</sub> + Σ<sub>i∈M</sub>y<sub>i</sub> + 1]
+  </div>
+  <p>Dice 只在 known/masked 区域中计算，用来缓解 occupied 像素稀少导致的类别不平衡。分子和分母中的 +1 是平滑项，避免空目标或小区域产生除零与极端梯度。</p>
+
+  <h3>4.4 单分支总损失</h3>
+  <div class="equation">
+    L<sub>b</sub> = w<sub>occ</sub>L<sub>occ</sub> + w<sub>obs</sub>L<sub>obs</sub> + w<sub>dice</sub>L<sub>dice</sub>
+  </div>
+  <p>历史配置使用：</p>
+  <div class="equation">
+    w<sub>occ</sub>=1.0，&nbsp;w<sub>obs</sub>=0.5，&nbsp;w<sub>dice</sub>=0.25
+  </div>
+
+  <h2>5. Single 与 merged 的聚合</h2>
+  <p>同一个 loss 分别作用于 single 与 merged 输出，最后线性组合：</p>
+  <div class="equation">
+    L<sub>BEV</sub> = w<sub>s</sub>L<sub>single</sub> + w<sub>m</sub>L<sub>merged</sub>
+  </div>
+  <p>历史默认权重为 w<sub>s</sub>=0.5、w<sub>m</sub>=0.5，因此：</p>
+  <div class="equation">
+    L<sub>BEV</sub> = 0.5L<sub>single</sub> + 0.5L<sub>merged</sub>
+  </div>
+  <p>merged decoder 直接读取多帧 token；该 loss 并未定义“先预测多个 single 再合并”的二级模型。</p>
+
+  <h2 class="page-break">6. 梯度到底作用在哪里</h2>
+  <table>
+    <tr><th>区域/参数</th><th>occupancy BCE</th><th>occupied Dice</th><th>observation BCE</th></tr>
+    <tr><td>observed free</td><td>有梯度，推动 p→0</td><td>进入分母，抑制 false occupied</td><td>推动 q→1</td></tr>
+    <tr><td>observed occupied</td><td>有梯度，推动 p→1</td><td>进入交集与分母</td><td>推动 q→1</td></tr>
+    <tr><td>unknown</td><td>无梯度</td><td>无梯度</td><td>推动 q→0</td></tr>
+    <tr><td>complete-only/occluded truth</td><td colspan="3">根本不作为 target 进入 loss</td></tr>
+  </table>
+  <p>因此，该版本不会鼓励模型猜测障碍物后方或视野外的 free/occupied。unknown 区域里的 occupancy logit 可以是任意值，但部署时必须被 predicted observed mask 屏蔽。</p>
+
+  <h2>7. 与“置信度”的关系</h2>
+  <p>该老版本没有单独的 confidence head，也没有 Beta/Dirichlet evidence。两个 sigmoid 输出分别表达：</p>
+  <ul>
+    <li>p：在已知区域里是 occupied 的概率；</li>
+    <li>q：该像素是否属于 observed/known 区域的概率。</li>
+  </ul>
+  <p>q 高并不代表 occupancy 判断正确；它只代表模型认为该像素应该被显示。因此不能把 q 直接当作导航置信度，也不能从它区分“模型确定地预测 free”和“模型只是认为这里被观察到”。</p>
+
+  <h2>8. 代码级伪代码</h2>
+  <pre>def masked_branch_loss(occupancy_logit, observed_logit, target):
+    known = target != UNKNOWN_112
+    occupied = target == OCCUPIED_0
+
+    if known.any():
+        occupancy_bce = BCEWithLogits(
+            occupancy_logit[known], occupied[known]
+        )
+        occupied_dice = dice(sigmoid(occupancy_logit[known]),
+                             occupied[known])
+    else:
+        occupancy_bce = 0
+        occupied_dice = 0
+
+    observation_bce = BCEWithLogits(observed_logit, known)
+
+    return 1.0 * occupancy_bce \
+         + 0.5 * observation_bce \
+         + 0.25 * occupied_dice
+
+loss = 0.5 * masked_branch_loss(single_prediction, single_masked_gt) \
+     + 0.5 * masked_branch_loss(merged_prediction, merged_masked_gt)</pre>
+
+  <h2 class="page-break">9. 该设计的优点</h2>
+  <ol>
+    <li><strong>监督边界清晰：</strong>只有传感器直接观察到的 free/occupied 影响 occupancy，不会把未知区域的先验猜测注入 observed 学习。</li>
+    <li><strong>实现简单：</strong>两个 BCE 加一个 Dice，梯度路径容易检查，几乎没有 completion 与 observed 之间的冲突。</li>
+    <li><strong>适合几何转换验证：</strong>当目标只是验证 RGB→observed BEV 的可行性时，它比完整补全目标更容易定位错误。</li>
+    <li><strong>single/merged 对称：</strong>相同数学形式便于比较单帧转换与多帧聚合。</li>
+  </ol>
+
+  <h2>10. 已知问题与失败模式</h2>
+  <ol>
+    <li><strong>无法补全：</strong>unknown 区域没有 occupancy 梯度，因此模型不应被期待输出障碍物后方的完整状态。</li>
+    <li><strong>没有真正的置信度：</strong>observed probability 只是 mask 概率，不是预测正确率或 epistemic uncertainty。</li>
+    <li><strong>occupied Dice 可能面积化稀疏表面：</strong>observed occupied 往往只是一条 first-hit surface。Dice 倾向于提高区域重叠，可能推动模型把细表面变厚。</li>
+    <li><strong>全图 mask BCE 有类别不平衡：</strong>unknown 面积通常很大；未使用 class weight/focal loss 时，mask 学习可能被背景数量主导。</li>
+    <li><strong>unknown 内 occupancy 无约束：</strong>如果 runtime 忘记使用 observed mask，unknown 区域可能暴露随机或数据先验式 occupancy。</li>
+    <li><strong>single/merged 固定 0.5/0.5：</strong>两个任务难度与像素数不同，固定等权并不保证梯度规模相等，可能出现一支表现好、另一支较差。</li>
+  </ol>
+
+  <h2>11. 历史验证指标</h2>
+  <p>对应 metrics 以阈值 0.5 将 sigmoid 输出二值化，并报告：</p>
+  <ul>
+    <li>known 区域内 occupied IoU/F1 与 free IoU/F1；</li>
+    <li>全图 unknown IoU/F1；</li>
+    <li>occupied/free/unknown 三类 macro F1；</li>
+    <li>occupancy ECE 与 observation ECE；</li>
+    <li>occupied boundary Chamfer distance。</li>
+  </ul>
+  <p>这些指标中，observation ECE 仍然只是 known-mask 概率校准，不等于 occupancy correctness confidence。</p>
+
+  <h2 class="page-break">12. 与当前 P1B 的兼容性</h2>
+  <p>该 loss 不能原样粘贴到当前 P1B，原因是当前输出为：</p>
+  <ul>
+    <li><code>alpha_occupied</code> / <code>beta_free</code> Beta evidence；</li>
+    <li><code>fov_support_logit</code>；</li>
+    <li>并行 metric scale token。</li>
+  </ul>
+  <p>如果要在不改变当前 P1B 模型结构的情况下复现 masked-only 行为，数学上的等价迁移应当是：</p>
+  <ol>
+    <li>只保留 observed free 与 observed surface 的 evidential NLL；</li>
+    <li>保留 FOV/support loss，但明确它只学习几何支持范围；</li>
+    <li>令 guessed NLL、guessed Dice、guessed evidence calibration、relation loss 全部为 0；</li>
+    <li>令 <code>guessed_region_weight=0</code>，避免 direct loss 被旧分母缩小；</li>
+    <li>关闭 completion PCGrad；</li>
+    <li>scale loss 可作为独立任务保留，它不属于 BEV completion。</li>
+  </ol>
+  <div class="warning"><strong>不建议恢复的部分：</strong>不要把 <code>observed_logit</code> 当作置信度重新加入当前模型；当前 Beta evidence 已提供更清晰的 confidence/uncertainty 语义。</div>
+
+  <h2>13. 最终总结</h2>
+  <div class="summary">
+    老版本 masked-only loss 的本质是“先学习 observed mask，再只在 mask 内学习 free/occupied”。它完全避免 completion 对 observed 的梯度干扰，适合作为 RGB→直接观测 BEV 的基线；代价是无法预测遮挡区域，也没有可解释的 occupancy confidence。当前 P1B 若需要同类基线，应复用其“监督区域隔离”思想，而不是恢复旧的双 sigmoid 输出结构。
+  </div>
+
+  <div class="footer-note">
+    代码依据：<code>VGGTBEV_Method1/configs/remote_observed_6p5m_10m.toml</code>；
+    <code>src/vggt_bev_method1/losses.py</code> 中的 <code>branch_loss()</code>、<code>dual_method1_loss()</code>；
+    <code>data/dataset.py</code> 的 observed target 路由；
+    <code>tests/test_losses.py</code> 的 masked-only 梯度测试。
+  </div>
+</body>
+</html>

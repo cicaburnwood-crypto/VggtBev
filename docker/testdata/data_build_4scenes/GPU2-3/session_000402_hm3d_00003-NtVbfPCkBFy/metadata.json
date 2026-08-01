@@ -1,0 +1,175 @@
+{
+  "schema_version": 4,
+  "status": "complete",
+  "session_id": "session_000402_hm3d_00003-NtVbfPCkBFy",
+  "session_seed": 366027308,
+  "scene_sampling_cycle": 0,
+  "dataset": "hm3d",
+  "dataset_root": "/data/project/vggt/data/scene_datasets/hm3d",
+  "scene_id": "00003-NtVbfPCkBFy",
+  "scene_file": "/data/project/vggt/data/scene_datasets/hm3d/train/00003-NtVbfPCkBFy/NtVbfPCkBFy.basis.glb",
+  "scene_dataset_config": null,
+  "navmesh_file": "/data/project/vggt/data/scene_datasets/hm3d/train/00003-NtVbfPCkBFy/NtVbfPCkBFy.basis.navmesh",
+  "navmesh_source": "loaded_by_scene_configuration",
+  "asset_load_verified": true,
+  "path_verified_before_capture": true,
+  "random_parameters": {
+    "horizontal_fov_degrees": 99.5015865978665,
+    "camera_height_m": 0.5302723920646042,
+    "robot_speed_mps": 1.8695236172383458
+  },
+  "camera_intrinsics": {
+    "model": "pinhole",
+    "width": 640,
+    "height": 480,
+    "fx": 270.89239081221035,
+    "fy": 270.89239081221035,
+    "cx": 319.5,
+    "cy": 239.5,
+    "K": [
+      [
+        270.89239081221035,
+        0.0,
+        319.5
+      ],
+      [
+        0.0,
+        270.89239081221035,
+        239.5
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "horizontal_fov_degrees": 99.5015865978665,
+    "vertical_fov_degrees": 83.079360227228,
+    "pixel_coordinate_convention": "integer coordinates address pixel centers; origin is top-left"
+  },
+  "camera_intrinsics_file": "camera_intrinsics.json",
+  "camera_extrinsics_file": "camera_extrinsics.jsonl",
+  "depth": {
+    "directory": "depth",
+    "filename_pattern": "frame_INDEX.npy",
+    "format": "NumPy .npy",
+    "dtype": "float32",
+    "units": "metres",
+    "source": "Habitat-Sim pinhole depth sensor ground truth",
+    "near_m": 0.01,
+    "far_m": 1000.0
+  },
+  "capture_hz": 2.0,
+  "gpu_device_id": 0,
+  "motion_model": "constant-speed kinematic replay along the verified Habitat ShortestPath polyline",
+  "bev": {
+    "size": 512,
+    "extent_classes_m": [
+      6.5
+    ],
+    "obstacle_height_band_m": [
+      0.0,
+      1.4
+    ],
+    "truth_source": "solid Habitat collision-mesh voxel occupancy",
+    "voxel_size_m": 0.01,
+    "masked_values": {
+      "occupied": 0,
+      "unknown": 112,
+      "free": 255
+    },
+    "fusion_rule": "temporal union of observed cells; merged masked and complete values come from the same accumulated static collision truth; never-observed cells remain unknown",
+    "merged_fusion_version": 2,
+    "merged_orientation": "ego-centric in every output; latest robot centered and forward up",
+    "merged_normalized_extents_m": [
+      10.0
+    ],
+    "merged_normalized_size": [
+      512,
+      512
+    ]
+  },
+  "voxel_statistics": {
+    "collision_triangle_count": 104089,
+    "voxel_layers": 137,
+    "voxel_size_m": 0.01,
+    "surface_voxel_count": 4035455,
+    "solid_voxel_count": 4143154,
+    "occupied_column_count": 433145,
+    "source": "active Habitat stage plus all instantiated rigid objects",
+    "stage_source": "/data/project/vggt/data/scene_datasets/hm3d/train/00003-NtVbfPCkBFy/NtVbfPCkBFy.basis.glb",
+    "rigid_object_count": 0,
+    "collision_asset_count": 1,
+    "collision_assets": [
+      "/data/project/vggt/data/scene_datasets/hm3d/train/00003-NtVbfPCkBFy/NtVbfPCkBFy.basis.glb"
+    ]
+  },
+  "estimated_voxel_grid_cells": 565469966,
+  "voxel_grid_cell_limit": null,
+  "path": {
+    "start": [
+      11.850050926208496,
+      0.17142342031002045,
+      -0.7449018955230713
+    ],
+    "goal": [
+      13.110647201538086,
+      0.24419429898262024,
+      -3.512888193130493
+    ],
+    "reachable": true,
+    "geodesic_distance_m": 3.042391538619995,
+    "polyline_distance_m": 3.0423916108712996,
+    "waypoints": [
+      [
+        11.850050926208496,
+        0.17142342031002045,
+        -0.7449018955230713
+      ],
+      [
+        13.110647201538086,
+        0.24419429898262024,
+        -3.512888193130493
+      ]
+    ],
+    "duration_s": 1.6273619561787138
+  },
+  "frame_count": 5,
+  "vggt_estimates": {
+    "status": "skipped"
+  },
+  "completed_at_unix_s": 1785078249.9830203,
+  "wall_time_s": 2.114203691482544,
+  "validation": {
+    "passed": true,
+    "frame_count": 5,
+    "synchronized_modalities_per_frame": 6,
+    "final_frame_value_sets": {
+      "bev_6p5m/masked": [
+        0,
+        112,
+        255
+      ],
+      "bev_6p5m/complete": [
+        0,
+        255
+      ],
+      "bev_6p5m/merged_masked_10m": [
+        0,
+        112,
+        255
+      ],
+      "bev_6p5m/merged_complete_10m": [
+        0,
+        112,
+        255
+      ]
+    },
+    "depth_format": "float32 metres in NumPy .npy",
+    "camera_intrinsics_file": "camera_intrinsics.json",
+    "camera_extrinsics_file": "camera_extrinsics.jsonl",
+    "final_goal_error_m": 0.0,
+    "maximum_speed_error_mps": 1.1102230246251565e-15,
+    "maximum_camera_height_error_m": 5.7250532536912146e-08
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "format_version": 6,
+  "created_at_utc": "2026-07-29T16:32:16.381125+00:00",
+  "dataset_root": "/home/user/Project/VGGTBEV_Method1_P1B/docker/testdata/data_build_4scenes",
+  "source_session_count": 4,
+  "maximum_sessions": null,
+  "source_writer_count_at_freeze": 0,
+  "snapshot_scope": "immutable_dataset",
+  "selection_order": "lexicographic session key, first N before scene split",
+  "validation_fraction": 0.25,
+  "split_seed": 17,
+  "session_count": 4,
+  "scene_count": 4,
+  "train": [
+    {
+      "key": "GPU1-1/session_001325_hm3d_00002-FxCkHAfgh7A",
+      "scene_key": "hm3d:00002-FxCkHAfgh7A",
+      "frame_count": 5,
+      "metadata_sha256": "c2603c297797b8f23136026e3e6bab1d58bc0e02ff65028d813b8df888176540",
+      "artifact_inventory_sha256": "b1b5e1bf62b9fce68c6e68f9123d21e84197b35d9211287dd6f83a7678f359ff",
+      "artifact_count": 32
+    },
+    {
+      "key": "GPU2-3/session_000402_hm3d_00003-NtVbfPCkBFy",
+      "scene_key": "hm3d:00003-NtVbfPCkBFy",
+      "frame_count": 5,
+      "metadata_sha256": "e592dac5e49156f750279f2c30098c51a434325591fee1580686b50799055ba3",
+      "artifact_inventory_sha256": "561db44a07df1fc3d6c27d924fb997e39d24e32608ca5a89cfa6a922bbd2ca5a",
+      "artifact_count": 32
+    },
+    {
+      "key": "GPU2-4/session_000710_hm3d_00001-UVdNNRcVyV1",
+      "scene_key": "hm3d:00001-UVdNNRcVyV1",
+      "frame_count": 5,
+      "metadata_sha256": "6a337b81a50b5eee83a37a338a136209a1f8574217c1087e3ec2311119da94f8",
+      "artifact_inventory_sha256": "354c1d91556255efb3894f1f6844bc8cb1bc5b4257d63724a413fce5fbc0405f",
+      "artifact_count": 32
+    }
+  ],
+  "validation": [
+    {
+      "key": "GPU1-5/session_001043_hm3d_00000-kfPV7w3FaU5",
+      "scene_key": "hm3d:00000-kfPV7w3FaU5",
+      "frame_count": 5,
+      "metadata_sha256": "5e8b7a320bd295e3b51c7194fac9584f0ffd99fa406a40ec19a54b7bddfdbc5f",
+      "artifact_inventory_sha256": "b16b5227c4e0b868f644e3a6738d5c1854df7663b38ac0e6e1cb733aa290a163",
+      "artifact_count": 32
+    }
+  ],
+  "content_sha256": "a46ae00d3ea11e6d2599eed378275f04ceece1a9dba86dc91c9e77f64167247b"
+}

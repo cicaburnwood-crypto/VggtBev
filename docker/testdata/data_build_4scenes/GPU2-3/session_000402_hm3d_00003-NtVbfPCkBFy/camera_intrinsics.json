@@ -1,0 +1,29 @@
+{
+  "model": "pinhole",
+  "width": 640,
+  "height": 480,
+  "fx": 270.89239081221035,
+  "fy": 270.89239081221035,
+  "cx": 319.5,
+  "cy": 239.5,
+  "K": [
+    [
+      270.89239081221035,
+      0.0,
+      319.5
+    ],
+    [
+      0.0,
+      270.89239081221035,
+      239.5
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "horizontal_fov_degrees": 99.5015865978665,
+  "vertical_fov_degrees": 83.079360227228,
+  "pixel_coordinate_convention": "integer coordinates address pixel centers; origin is top-left"
+}

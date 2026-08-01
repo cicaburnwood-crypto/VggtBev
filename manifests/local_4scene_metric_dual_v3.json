@@ -1,0 +1,46 @@
+{
+  "format_version": 4,
+  "created_at_utc": "2026-07-29T07:12:31.775229+00:00",
+  "dataset_root": "/home/user/Project/VGGTBEV_Method1_P1B/docker/testdata/data_build_4scenes",
+  "validation_fraction": 0.25,
+  "split_seed": 17,
+  "session_count": 4,
+  "scene_count": 4,
+  "train": [
+    {
+      "key": "GPU1-1/session_001325_hm3d_00002-FxCkHAfgh7A",
+      "scene_key": "hm3d:00002-FxCkHAfgh7A",
+      "frame_count": 5,
+      "metadata_sha256": "c2603c297797b8f23136026e3e6bab1d58bc0e02ff65028d813b8df888176540",
+      "artifact_inventory_sha256": "ea596172e95a7ad6aee71b6d84d06069421ad2e7728b02d975b70fd4809790d2",
+      "artifact_count": 20
+    },
+    {
+      "key": "GPU2-3/session_000402_hm3d_00003-NtVbfPCkBFy",
+      "scene_key": "hm3d:00003-NtVbfPCkBFy",
+      "frame_count": 5,
+      "metadata_sha256": "e592dac5e49156f750279f2c30098c51a434325591fee1580686b50799055ba3",
+      "artifact_inventory_sha256": "a142ecb461058aa8c9eac92034898c82b5455fd181083bf33dd2acf6470c98c6",
+      "artifact_count": 20
+    },
+    {
+      "key": "GPU2-4/session_000710_hm3d_00001-UVdNNRcVyV1",
+      "scene_key": "hm3d:00001-UVdNNRcVyV1",
+      "frame_count": 5,
+      "metadata_sha256": "6a337b81a50b5eee83a37a338a136209a1f8574217c1087e3ec2311119da94f8",
+      "artifact_inventory_sha256": "9d920e67fb2294af0a6de20fa620587def353cd6af27256be15a78730a0e3ac0",
+      "artifact_count": 20
+    }
+  ],
+  "validation": [
+    {
+      "key": "GPU1-5/session_001043_hm3d_00000-kfPV7w3FaU5",
+      "scene_key": "hm3d:00000-kfPV7w3FaU5",
+      "frame_count": 5,
+      "metadata_sha256": "5e8b7a320bd295e3b51c7194fac9584f0ffd99fa406a40ec19a54b7bddfdbc5f",
+      "artifact_inventory_sha256": "9df42923b4d7b977ed1acb8669416e81dc5c4b7969293b48e783440f849568a8",
+      "artifact_count": 20
+    }
+  ],
+  "content_sha256": "3a2eddb9457968bda67d47d93e38f184ca814d8c9b89d7a5b1793a413b78f679"
+}
