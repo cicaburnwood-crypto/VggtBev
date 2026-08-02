@@ -13,7 +13,6 @@ from vggt_bev_method1.models.p2b_probability import ProbabilityModel
 @dataclass(frozen=True)
 class P2BLossWeights:
     observed_gate_pixel: float = 1.0
-    surface_gate_pixel: float = 1.0
     guessed_pixel: float = 1.0
     wrong_evidence_kl: float = 0.01
     support_bce: float = 0.5
@@ -174,24 +173,14 @@ def p2b_bev_loss(
         * wrong_evidence
     )
 
-    observed_gate_bce, observed_guessed_bce, observed_visible_bce = (
+    observed_gate_bce, observed_guessed_bce, observed_free_bce = (
         _class_balanced_binary_bce(
             prediction["observed_gate_logit"].float(),
-            masks.observed,
+            masks.observed_free,
             masks.guessed,
         )
     )
-    surface_gate_bce, surface_free_bce, surface_occupied_bce = (
-        _class_balanced_binary_bce(
-            prediction["surface_gate_logit"].float(),
-            masks.observed_surface,
-            masks.observed_free,
-        )
-    )
-    routing_loss = (
-        weights.observed_gate_pixel * observed_gate_bce
-        + weights.surface_gate_pixel * surface_gate_bce
-    )
+    routing_loss = weights.observed_gate_pixel * observed_gate_bce
 
     support_logit = prediction["fov_support_logit"].float()
     support_truth = masks.valid.to(support_logit.dtype)
@@ -219,10 +208,7 @@ def p2b_bev_loss(
         "support_objective": support_loss,
         "observed_gate_pixel_bce": observed_gate_bce,
         "observed_gate_guessed_bce": observed_guessed_bce,
-        "observed_gate_visible_bce": observed_visible_bce,
-        "surface_gate_pixel_bce": surface_gate_bce,
-        "surface_gate_free_bce": surface_free_bce,
-        "surface_gate_occupied_bce": surface_occupied_bce,
+        "observed_gate_free_bce": observed_free_bce,
         "guessed_pixel_loss": guessed_pixel_loss,
         "wrong_evidence_kl": wrong_evidence,
         "wrong_evidence_scale": torch.tensor(
@@ -231,7 +217,8 @@ def p2b_bev_loss(
         "support_bce_loss": support_bce,
         "support_dice_loss": support_dice,
         "observed_free_fraction": masks.observed_free.float().mean(),
-        "observed_surface_fraction": masks.observed_surface.float().mean(),
         "guessed_fraction": masks.guessed.float().mean(),
+        "guessed_free_fraction": masks.guessed_free.float().mean(),
+        "guessed_occupied_fraction": masks.guessed_occupied.float().mean(),
         "support_fraction": masks.valid.float().mean(),
     }

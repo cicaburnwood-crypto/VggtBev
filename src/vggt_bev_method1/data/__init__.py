@@ -19,9 +19,9 @@ from .p2b_targets import (
     P2BRegionMasks,
     ROUTING_CLASS_COUNT,
     ROUTING_CLASS_NAMES,
-    ROUTING_GUESSED,
+    ROUTING_GUESSED_FREE,
+    ROUTING_GUESSED_OCCUPIED,
     ROUTING_OBSERVED_FREE,
-    ROUTING_OBSERVED_SURFACE,
     p2b_region_masks,
 )
 
@@ -40,8 +40,8 @@ __all__ = [
     "P2BRegionMasks",
     "ROUTING_CLASS_COUNT",
     "ROUTING_CLASS_NAMES",
-    "ROUTING_GUESSED",
+    "ROUTING_GUESSED_FREE",
+    "ROUTING_GUESSED_OCCUPIED",
     "ROUTING_OBSERVED_FREE",
-    "ROUTING_OBSERVED_SURFACE",
     "p2b_region_masks",
 ]

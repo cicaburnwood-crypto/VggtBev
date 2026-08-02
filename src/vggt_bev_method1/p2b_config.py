@@ -55,6 +55,12 @@ def validate_p2b_config(config: dict[str, Any]) -> None:
             raise ValueError(f"model.{name} must remain {expected}")
         if float(model[name]) != float(data[name]):
             raise ValueError(f"data.{name} and model.{name} must match")
+    if int(model.get("single_latent_bev_size", 0)) != int(
+        model["single_bev_output_size"]
+    ):
+        raise ValueError(
+            "P2B single_latent_bev_size must equal the native 512 output size"
+        )
     probability_model = str(model.get("probability_model", ""))
     expected_pipeline = {
         "evidential": "P2B-NLL",
@@ -87,6 +93,7 @@ def validate_p2b_config(config: dict[str, Any]) -> None:
         "gate_monotonic_weight",
         "fusion_gate_weight",
         "routing_pixel_weight",
+        "surface_gate_pixel_weight",
     }.intersection(training)
     if forbidden:
         raise ValueError(f"P2B forbids legacy loss fields: {sorted(forbidden)}")
@@ -127,7 +134,6 @@ def validate_p2b_config(config: dict[str, Any]) -> None:
     )
     for name in (
         "observed_gate_pixel_weight",
-        "surface_gate_pixel_weight",
         "guessed_pixel_weight",
         "wrong_evidence_kl_weight",
         "support_bce_weight",

@@ -14,14 +14,21 @@ Two strict variants are supported:
 
 Both variants retain the same RGB-only runtime contract, 512x512/6.5 m single
 BEV, 800x800/10 m merged BEV and metric Scale Token. The Routing decoder has
-an Observed Gate and a Surface Gate. The former learns GT masked-known versus
-masked-unknown; the latter learns GT masked-occupied versus masked-free while
-masked-unknown pixels are ignored. Their probabilities compose
-`observed_free`, `observed_surface`, and `guessed`. Only guessed pixels consume
-learned occupancy/evidence. Outside the FOV remains unknown.
+one Observed-free Gate and no Surface Gate. Masked free pixels supervise the
+observed-free state. Every other valid FOV pixel, including masked occupied
+boundary pixels, is handled by the Guessed Expert as guessed-free or
+guessed-occupied. The three final states are `observed_free`, `guessed_free`,
+and `guessed_occupied`. Outside the FOV remains unknown.
 
-No ray bank or ray-derived loss is used. Both Gates use per-pixel BCE on the
-exact masked-BEV pixels, balanced across classes present in each sample.
+Training validation reports `observed_gate_precision`,
+`observed_gate_recall`, `observed_gate_f1`, and `observed_gate_iou` by
+thresholding the Observed Gate at 0.5 and comparing it directly with the
+masked-GT observed-free region. These metrics are not inferred from final
+three-state argmax routing.
+
+No ray bank or ray-derived loss is used. The Observed-free Gate uses per-pixel
+BCE on exact masked-BEV pixels. The Guessed Expert uses dense per-pixel
+Evidential NLL or BCE over all remaining valid cells.
 
 The new training entrypoint is:
 
@@ -32,8 +39,8 @@ python -m vggt_bev_method1.cli_train_p2b --config CONFIG.toml
 Checkpoint schemas are intentionally incompatible:
 
 ```text
-P2B-NLL: p2b-masked-gates-evidential-v2
-P2B-BCE: p2b-masked-gates-bce-v2
+P2B-NLL: p2b-three-region-evidential-v3
+P2B-BCE: p2b-three-region-bce-v3
 ```
 
 Legacy P1B modules remain in the repository only for historical comparison and
@@ -73,12 +80,12 @@ depth, intrinsics, extrinsics, confidence, or a point cloud.
 The output is:
 
 - per-BEV `routing_probability`: `[B,3,H,W]` ordered as observed-free,
-  observed-surface, guessed;
+  guessed-free, guessed-occupied;
 - per-BEV `guessed`: occupied/free Beta evidence used only for completion;
 - `single_bev.fov_support_probability`: `[B,512,512]`;
 - `merged_bev.fov_support_probability`: `[B,800,800]`;
-- per-BEV `occupancy_probability = P(surface) + P(guessed) ×
-  P(occupied|guessed)`; outside predicted support is unknown;
+- per-BEV `occupancy_probability = P(guessed) × P(occupied|guessed)`;
+  outside predicted support is unknown;
 - per-BEV `fov_complete_semantic` assembled as occupied `0`, unknown `112`,
   and free `255`;
 - per-BEV routing entropy, mixture variance and navigation confidence;

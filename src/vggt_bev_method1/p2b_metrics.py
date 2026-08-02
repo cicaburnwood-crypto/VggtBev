@@ -4,9 +4,9 @@ import torch
 
 from vggt_bev_method1.config import LabelValues
 from vggt_bev_method1.data.p2b_targets import (
-    ROUTING_GUESSED,
+    ROUTING_GUESSED_FREE,
+    ROUTING_GUESSED_OCCUPIED,
     ROUTING_OBSERVED_FREE,
-    ROUTING_OBSERVED_SURFACE,
     p2b_region_masks,
 )
 
@@ -54,19 +54,41 @@ def p2b_metric_totals(
             masks.valid,
             ROUTING_OBSERVED_FREE,
         ),
-        "surface": _pixel_class_counts(
+        "routing_guessed_free": _pixel_class_counts(
             routing_predicted,
             masks.routing_target,
             masks.valid,
-            ROUTING_OBSERVED_SURFACE,
+            ROUTING_GUESSED_FREE,
         ),
-        "routing_guessed": _pixel_class_counts(
+        "routing_guessed_occupied": _pixel_class_counts(
             routing_predicted,
             masks.routing_target,
             masks.valid,
-            ROUTING_GUESSED,
+            ROUTING_GUESSED_OCCUPIED,
         ),
     }
+    predicted_guessed = masks.valid & (
+        routing_predicted != ROUTING_OBSERVED_FREE
+    )
+    routing_guessed_tp = (predicted_guessed & masks.guessed).sum()
+    routing_guessed_fp = (predicted_guessed & ~masks.guessed).sum()
+    routing_guessed_fn = (~predicted_guessed & masks.guessed).sum()
+
+    # Monitor the Observed Gate itself, independently of the final three-way
+    # routing argmax. Its GT is exactly the masked-BEV observed-free region.
+    observed_gate_predicted = (
+        prediction["observed_gate_probability"].float() >= 0.5
+    )
+    observed_gate_truth = masks.observed_free
+    observed_gate_tp = (
+        masks.valid & observed_gate_predicted & observed_gate_truth
+    ).sum()
+    observed_gate_fp = (
+        masks.valid & observed_gate_predicted & ~observed_gate_truth
+    ).sum()
+    observed_gate_fn = (
+        masks.valid & ~observed_gate_predicted & observed_gate_truth
+    ).sum()
 
     guessed_probability = prediction["guessed"]["occupancy_probability"].float()
     guessed_predicted = guessed_probability >= 0.5
@@ -103,6 +125,12 @@ def p2b_metric_totals(
         "guessed_tn": count(guessed_tn),
         "observed_free_fp": count(observed_free_fp),
         "observed_free_count": count(observed_free_count),
+        "routing_guessed_tp": count(routing_guessed_tp),
+        "routing_guessed_fp": count(routing_guessed_fp),
+        "routing_guessed_fn": count(routing_guessed_fn),
+        "observed_gate_tp": count(observed_gate_tp),
+        "observed_gate_fp": count(observed_gate_fp),
+        "observed_gate_fn": count(observed_gate_fn),
         "support_tp": count(support_tp),
         "support_fp": count(support_fp),
         "support_fn": count(support_fn),
@@ -138,8 +166,6 @@ def finalize_p2b_metrics(totals: dict[str, float]) -> dict[str, float]:
             + totals[f"{prefix}_fn"],
         )
 
-    surface_precision = precision("surface")
-    surface_recall = recall("surface")
     guessed_precision = _safe_ratio(
         totals["guessed_tp"], totals["guessed_tp"] + totals["guessed_fp"]
     )
@@ -148,21 +174,26 @@ def finalize_p2b_metrics(totals: dict[str, float]) -> dict[str, float]:
     )
     routing_ious = [
         iou("routing_free"),
-        iou("surface"),
-        iou("routing_guessed"),
+        iou("routing_guessed_free"),
+        iou("routing_guessed_occupied"),
     ]
     return {
-        "surface_precision": surface_precision,
-        "surface_recall": surface_recall,
-        "surface_f1": _safe_ratio(
-            2.0 * surface_precision * surface_recall,
-            surface_precision + surface_recall,
+        "observed_gate_precision": precision("observed_gate"),
+        "observed_gate_recall": recall("observed_gate"),
+        "observed_gate_f1": _safe_ratio(
+            2.0 * precision("observed_gate") * recall("observed_gate"),
+            precision("observed_gate") + recall("observed_gate"),
         ),
-        "surface_iou": iou("surface"),
-        "observed_free_recall": recall("routing_free"),
+        "observed_gate_iou": iou("observed_gate"),
         "observed_free_false_occupied_rate": _safe_ratio(
             totals["observed_free_fp"], totals["observed_free_count"]
         ),
+        "guessed_free_precision": precision("routing_guessed_free"),
+        "guessed_free_recall": recall("routing_guessed_free"),
+        "guessed_free_iou": iou("routing_guessed_free"),
+        "guessed_occupied_precision": precision("routing_guessed_occupied"),
+        "guessed_occupied_recall": recall("routing_guessed_occupied"),
+        "guessed_occupied_iou": iou("routing_guessed_occupied"),
         "guessed_pixelwise_precision": guessed_precision,
         "guessed_pixelwise_recall": guessed_recall,
         "guessed_pixelwise_f1": _safe_ratio(

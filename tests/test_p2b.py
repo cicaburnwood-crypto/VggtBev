@@ -8,9 +8,9 @@ import torch
 from vggt_bev_method1.cli_freeze_split import load_split_config
 from vggt_bev_method1.config import LabelValues
 from vggt_bev_method1.data.p2b_targets import (
-    ROUTING_GUESSED,
+    ROUTING_GUESSED_FREE,
+    ROUTING_GUESSED_OCCUPIED,
     ROUTING_OBSERVED_FREE,
-    ROUTING_OBSERVED_SURFACE,
     p2b_region_masks,
 )
 from vggt_bev_method1.models.p2b import P2BHead
@@ -20,7 +20,10 @@ from vggt_bev_method1.models.p2b_probability import (
 )
 from vggt_bev_method1.p2b_config import load_p2b_config, validate_p2b_config
 from vggt_bev_method1.p2b_losses import P2BLossWeights, p2b_bev_loss
-from vggt_bev_method1.p2b_metrics import finalize_p2b_metrics
+from vggt_bev_method1.p2b_metrics import (
+    finalize_p2b_metrics,
+    p2b_metric_totals,
+)
 
 
 def _targets(size: int = 16) -> tuple[torch.Tensor, ...]:
@@ -43,16 +46,21 @@ def _prediction(size: int, probability_model: str) -> tuple[dict, list[torch.Ten
     channels = 2 if probability_model == "evidential" else 1
     guessed_raw = torch.zeros((1, channels, size, size), requires_grad=True)
     observed_gate_logit = torch.zeros((1, size, size), requires_grad=True)
-    surface_gate_logit = torch.zeros((1, size, size), requires_grad=True)
     support_logit = torch.zeros((1, size, size), requires_grad=True)
     guessed = decode_binary_prediction(guessed_raw, probability_model)
     observed_gate_probability = torch.sigmoid(observed_gate_logit)
-    surface_gate_probability = torch.sigmoid(surface_gate_logit)
+    guessed_region_probability = 1.0 - observed_gate_probability
+    guessed_occupied_probability = (
+        guessed_region_probability * guessed["occupancy_probability"]
+    )
+    guessed_free_probability = guessed_region_probability * (
+        1.0 - guessed["occupancy_probability"]
+    )
     routing_probability = torch.stack(
         (
-            observed_gate_probability * (1.0 - surface_gate_probability),
-            observed_gate_probability * surface_gate_probability,
-            1.0 - observed_gate_probability,
+            observed_gate_probability,
+            guessed_free_probability,
+            guessed_occupied_probability,
         ),
         dim=1,
     )
@@ -69,24 +77,25 @@ def _prediction(size: int, probability_model: str) -> tuple[dict, list[torch.Ten
             "routing_probability": routing_probability,
             "observed_gate_logit": observed_gate_logit,
             "observed_gate_probability": observed_gate_probability,
-            "surface_gate_logit": surface_gate_logit,
-            "surface_gate_probability": surface_gate_probability,
             "fov_support_logit": support_logit,
             "fov_support_probability": support_probability,
             "fused": fused,
         },
-        [guessed_raw, observed_gate_logit, surface_gate_logit, support_logit],
+        [guessed_raw, observed_gate_logit, support_logit],
     )
 
 
 def test_pixel_routing_targets_are_mutually_exclusive() -> None:
     complete, visible, support = _targets()
     masks = p2b_region_masks(complete, visible, support)
-    assert not bool((masks.observed & masks.guessed).any())
-    assert torch.equal(masks.observed | masks.guessed, masks.valid)
-    assert masks.observed_surface.sum() == 1
-    assert torch.equal(masks.observed_gate_target.bool(), masks.observed)
-    assert torch.equal(masks.surface_gate_target.bool(), masks.observed_surface)
+    assert not bool((masks.observed_free & masks.guessed).any())
+    assert torch.equal(masks.observed_free | masks.guessed, masks.valid)
+    assert torch.equal(
+        masks.guessed_free | masks.guessed_occupied,
+        masks.guessed,
+    )
+    assert masks.guessed_occupied.sum() == 2
+    assert torch.equal(masks.observed_gate_target.bool(), masks.observed_free)
     assert torch.equal(
         masks.routing_target[masks.observed_free],
         torch.full_like(
@@ -94,14 +103,17 @@ def test_pixel_routing_targets_are_mutually_exclusive() -> None:
         ),
     )
     assert torch.equal(
-        masks.routing_target[masks.observed_surface],
+        masks.routing_target[masks.guessed_free],
         torch.full_like(
-            masks.routing_target[masks.observed_surface], ROUTING_OBSERVED_SURFACE
+            masks.routing_target[masks.guessed_free], ROUTING_GUESSED_FREE
         ),
     )
     assert torch.equal(
-        masks.routing_target[masks.guessed],
-        torch.full_like(masks.routing_target[masks.guessed], ROUTING_GUESSED),
+        masks.routing_target[masks.guessed_occupied],
+        torch.full_like(
+            masks.routing_target[masks.guessed_occupied],
+            ROUTING_GUESSED_OCCUPIED,
+        ),
     )
 
 
@@ -135,7 +147,7 @@ def test_pixel_loss_is_amp_safe() -> None:
             probability_model="evidential",
         )
     result["loss"].backward()
-    assert torch.isfinite(result["surface_gate_pixel_bce"])
+    assert torch.isfinite(result["observed_gate_pixel_bce"])
     assert all(value.grad is not None for value in leaves)
 
 
@@ -146,7 +158,8 @@ def test_fusion_obeys_deterministic_routes() -> None:
     support = torch.ones((1, 1, 1))
     expected = (
         ((1.0, 0.0, 0.0), 0.0),
-        ((0.0, 1.0, 0.0), 1.0),
+        ((0.0, 1.0, 0.0), 0.0),
+        ((0.0, 0.0, 1.0), 1.0),
     )
     for route, occupancy in expected:
         routing = torch.tensor(route).reshape(1, 3, 1, 1)
@@ -181,7 +194,7 @@ def test_guessed_and_routing_decoders_are_independent() -> None:
         scale_decoder_layers=1,
         self_attention_mode="linear",
         cross_attention_mode="linear",
-        single_latent_bev_size=4,
+        single_latent_bev_size=8,
         merged_latent_bev_size=4,
         single_output_size=8,
         merged_output_size=8,
@@ -209,15 +222,21 @@ def test_guessed_and_routing_decoders_are_independent() -> None:
 def test_metric_finalization_uses_pixel_counts() -> None:
     metrics = finalize_p2b_metrics(
         {
-            "surface_tp": 8,
-            "surface_fp": 2,
-            "surface_fn": 2,
             "routing_free_tp": 90,
             "routing_free_fp": 5,
             "routing_free_fn": 10,
-            "routing_guessed_tp": 80,
-            "routing_guessed_fp": 10,
-            "routing_guessed_fn": 20,
+            "routing_guessed_free_tp": 40,
+            "routing_guessed_free_fp": 5,
+            "routing_guessed_free_fn": 10,
+            "routing_guessed_occupied_tp": 8,
+            "routing_guessed_occupied_fp": 2,
+            "routing_guessed_occupied_fn": 2,
+            "routing_guessed_tp": 48,
+            "routing_guessed_fp": 5,
+            "routing_guessed_fn": 12,
+            "observed_gate_tp": 90,
+            "observed_gate_fp": 5,
+            "observed_gate_fn": 10,
             "guessed_tp": 6,
             "guessed_fp": 2,
             "guessed_fn": 4,
@@ -232,10 +251,27 @@ def test_metric_finalization_uses_pixel_counts() -> None:
             "high_confidence_wrong": 1,
         }
     )
-    assert metrics["surface_precision"] == 0.8
-    assert metrics["surface_recall"] == 0.8
+    assert metrics["guessed_occupied_precision"] == 0.8
+    assert metrics["guessed_occupied_recall"] == 0.8
+    assert metrics["observed_gate_precision"] == 90 / 95
+    assert metrics["observed_gate_recall"] == 0.9
     assert metrics["observed_free_false_occupied_rate"] == 0.05
     assert metrics["guessed_pixelwise_precision"] == 0.75
+
+
+def test_observed_monitor_reads_gate_not_three_way_argmax() -> None:
+    complete, visible, support = _targets()
+    prediction, _ = _prediction(complete.shape[-1], "evidential")
+    gate = torch.full_like(prediction["observed_gate_probability"], 0.4)
+    prediction["observed_gate_probability"] = gate
+    prediction["routing_probability"] = torch.stack(
+        (gate, 0.3 * torch.ones_like(gate), 0.3 * torch.ones_like(gate)),
+        dim=1,
+    )
+    totals = p2b_metric_totals(prediction, complete, visible, support)
+    assert int(totals["observed_gate_tp"]) == 0
+    assert int(totals["observed_gate_fn"]) == 3
+    assert int(totals["routing_free_tp"]) == 3
 
 
 def test_nll_and_bce_configs_have_incompatible_contracts() -> None:
@@ -258,6 +294,14 @@ def test_config_rejects_removed_ray_losses() -> None:
     config = load_p2b_config("configs/p2b_nll_local_smoke.toml")
     mismatch = copy.deepcopy(config)
     mismatch["training"]["ray_sequence_weight"] = 1.0
+    with pytest.raises(ValueError, match="forbids legacy loss fields"):
+        validate_p2b_config(mismatch)
+
+
+def test_config_rejects_removed_surface_gate() -> None:
+    config = load_p2b_config("configs/p2b_nll_local_smoke.toml")
+    mismatch = copy.deepcopy(config)
+    mismatch["training"]["surface_gate_pixel_weight"] = 1.0
     with pytest.raises(ValueError, match="forbids legacy loss fields"):
         validate_p2b_config(mismatch)
 

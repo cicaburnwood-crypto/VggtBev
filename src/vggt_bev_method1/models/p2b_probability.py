@@ -54,25 +54,27 @@ def fuse_pixel_routing(
     support_probability: torch.Tensor,
     probability_model: ProbabilityModel,
 ) -> dict[str, torch.Tensor]:
-    """Fuse deterministic routing states with the learned guessed occupancy."""
+    """Fuse observed-free, guessed-free and guessed-occupied probabilities."""
 
     if routing_probability.ndim != 4 or routing_probability.shape[1] != 3:
         raise ValueError("routing probability must be Bx3xHxW")
     observed_free = routing_probability[:, 0].float()
-    observed_surface = routing_probability[:, 1].float()
-    guessed_region = routing_probability[:, 2].float()
+    guessed_free = routing_probability[:, 1].float()
+    guessed_occupied = routing_probability[:, 2].float()
+    guessed_region = guessed_free + guessed_occupied
     guessed_mean = guessed["occupancy_probability"].float()
     support = support_probability.float().clamp(0.0, 1.0)
     if not (
         observed_free.shape
-        == observed_surface.shape
+        == guessed_free.shape
+        == guessed_occupied.shape
         == guessed_region.shape
         == guessed_mean.shape
         == support.shape
     ):
         raise ValueError("routing, completion and support raster shapes must match")
 
-    probability = observed_surface + guessed_region * guessed_mean
+    probability = guessed_occupied
     classification_confidence = (2.0 * probability - 1.0).abs()
     routing_entropy = -(
         routing_probability.float().clamp_min(1e-8).log()
@@ -89,15 +91,14 @@ def fuse_pixel_routing(
         "routing_entropy": routing_entropy,
         "routing_confidence": routing_confidence,
         "observed_free_probability": observed_free,
-        "observed_surface_probability": observed_surface,
+        "guessed_free_probability": guessed_free,
+        "guessed_occupied_probability": guessed_occupied,
         "guessed_region_probability": guessed_region,
     }
 
     if probability_model == "evidential":
         guessed_variance = guessed["occupancy_distribution_variance"].float()
-        mixture_variance = observed_free * probability.square() + observed_surface * (
-            1.0 - probability
-        ).square() + guessed_region * (
+        mixture_variance = observed_free * probability.square() + guessed_region * (
             guessed_variance + (guessed_mean - probability).square()
         )
         distribution_confidence = (1.0 - 4.0 * mixture_variance).clamp(0.0, 1.0)

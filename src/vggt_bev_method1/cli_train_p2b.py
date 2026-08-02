@@ -52,10 +52,10 @@ from vggt_bev_method1.training_state import (
     StratifiedValidationSampler,
 )
 
-FORMAT_VERSION = 19
+FORMAT_VERSION = 20
 SCHEMAS = {
-    "evidential": "p2b-masked-gates-evidential-v2",
-    "bce": "p2b-masked-gates-bce-v2",
+    "evidential": "p2b-three-region-evidential-v3",
+    "bce": "p2b-three-region-bce-v3",
 }
 
 
@@ -125,7 +125,6 @@ def _set_stage(model: P2BSystem, stage: str, enabled: tuple[str, ...]) -> None:
 def _loss_weights(training: dict) -> P2BLossWeights:
     return P2BLossWeights(
         observed_gate_pixel=float(training.get("observed_gate_pixel_weight", 1.0)),
-        surface_gate_pixel=float(training.get("surface_gate_pixel_weight", 1.0)),
         guessed_pixel=float(training.get("guessed_pixel_weight", 1.0)),
         wrong_evidence_kl=float(training.get("wrong_evidence_kl_weight", 0.0)),
         support_bce=float(training.get("support_bce_weight", 0.5)),
@@ -206,8 +205,12 @@ def checkpoint_contract(config: dict, manifest_sha256: str) -> dict:
         "probability_model": probability_model,
         "manifest_sha256": manifest_sha256,
         "runtime_inputs": ["rgb_window"],
-        "bev_architecture": "masked-observed-and-surface-gates-plus-completion",
-        "routing_classes": ["observed_free", "observed_surface", "guessed"],
+        "bev_architecture": "observed-free-gate-plus-guessed-binary-completion",
+        "routing_classes": [
+            "observed_free",
+            "guessed_free",
+            "guessed_occupied",
+        ],
         "single_output": [512, 512, 6.5],
         "merged_output": [800, 800, 10.0],
     }

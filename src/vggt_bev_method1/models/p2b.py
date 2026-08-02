@@ -112,7 +112,7 @@ class DenseMetricQueryDecoder(nn.Module):
 
 
 class PixelRoutedBEVDecoder(nn.Module):
-    """Three-state pixel routing plus one learned completion decoder."""
+    """Observed-free Gate plus one learned guessed occupancy decoder."""
 
     def __init__(self, *, probability_model: ProbabilityModel, **arguments) -> None:
         super().__init__()
@@ -122,8 +122,9 @@ class PixelRoutedBEVDecoder(nn.Module):
             output_channels=expert_channels,
             **arguments,
         )
-        # Observed Gate, Surface Gate, and FOV Support.
-        self.routing = DenseMetricQueryDecoder(output_channels=3, **arguments)
+        # Observed-free Gate and independent FOV Support. Occupied boundary
+        # pixels are handled by the guessed expert; there is no Surface Gate.
+        self.routing = DenseMetricQueryDecoder(output_channels=2, **arguments)
         self.output_size = self.guessed.output_size
         self.extent_m = self.guessed.extent_m
 
@@ -137,15 +138,21 @@ class PixelRoutedBEVDecoder(nn.Module):
         )
         routing_raw = self.routing(routing_pyramid).float()
         observed_gate_logit = routing_raw[:, 0]
-        surface_gate_logit = routing_raw[:, 1]
-        support_logit = routing_raw[:, 2]
+        support_logit = routing_raw[:, 1]
         observed_gate_probability = torch.sigmoid(observed_gate_logit)
-        surface_gate_probability = torch.sigmoid(surface_gate_logit)
+        guessed_region_probability = 1.0 - observed_gate_probability
+        guessed_occupied_probability = (
+            guessed_region_probability * guessed["occupancy_probability"].float()
+        )
+        guessed_free_probability = (
+            guessed_region_probability
+            * (1.0 - guessed["occupancy_probability"].float())
+        )
         routing_probability = torch.stack(
             (
-                observed_gate_probability * (1.0 - surface_gate_probability),
-                observed_gate_probability * surface_gate_probability,
-                1.0 - observed_gate_probability,
+                observed_gate_probability,
+                guessed_free_probability,
+                guessed_occupied_probability,
             ),
             dim=1,
         )
@@ -162,11 +169,10 @@ class PixelRoutedBEVDecoder(nn.Module):
             "routing_class": routing_probability.argmax(dim=1),
             "observed_gate_logit": observed_gate_logit,
             "observed_gate_probability": observed_gate_probability,
-            "surface_gate_logit": surface_gate_logit,
-            "surface_gate_probability": surface_gate_probability,
             "observed_free_probability": routing_probability[:, 0],
-            "observed_surface_probability": routing_probability[:, 1],
-            "guessed_region_probability": routing_probability[:, 2],
+            "guessed_free_probability": routing_probability[:, 1],
+            "guessed_occupied_probability": routing_probability[:, 2],
+            "guessed_region_probability": guessed_region_probability,
             "fov_support_logit": support_logit,
             "fov_support_probability": support_probability,
             "fused": fused,
@@ -179,7 +185,7 @@ class PixelRoutedBEVDecoder(nn.Module):
 
 
 class P2BHead(nn.Module):
-    """Pixel routing, guessed completion and the independent metric Scale Token."""
+    """Observed-free routing, guessed completion and metric Scale Token."""
 
     def __init__(
         self,
@@ -196,7 +202,7 @@ class P2BHead(nn.Module):
         cross_attention_mode: str = "deformable",
         deformable_samples: int = 4,
         cross_query_chunk_size: int = 4096,
-        single_latent_bev_size: int = 64,
+        single_latent_bev_size: int = 512,
         merged_latent_bev_size: int = 80,
         single_output_size: int = 512,
         merged_output_size: int = 800,
@@ -207,6 +213,11 @@ class P2BHead(nn.Module):
         super().__init__()
         if probability_model not in ("evidential", "bce"):
             raise ValueError("probability_model must be evidential or bce")
+        if int(single_latent_bev_size) != int(single_output_size):
+            raise ValueError(
+                "P2B single BEV must decode natively at output resolution; "
+                "latent upsampling is forbidden"
+            )
         self.probability_model: ProbabilityModel = probability_model
         projector_arguments = (
             cached_layers,
