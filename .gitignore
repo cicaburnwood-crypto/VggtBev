@@ -22,3 +22,9 @@ logs/
 visualizations/
 visualization_data/
 simulator_assets/
+
+# Local operational notes; never publish server or credential context.
+Agent.md
+AGENT.md
+agents.md
+AGENTS.md
