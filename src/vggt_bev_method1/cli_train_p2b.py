@@ -32,6 +32,7 @@ from vggt_bev_method1.models import (
 from vggt_bev_method1.p2b_config import load_p2b_config
 from vggt_bev_method1.p2b_losses import (
     P2BLossWeights,
+    hidden_occupied_supervision_weight,
     p2b_bev_loss,
     wrong_evidence_kl_weight,
 )
@@ -52,10 +53,10 @@ from vggt_bev_method1.training_state import (
     StratifiedValidationSampler,
 )
 
-FORMAT_VERSION = 20
+FORMAT_VERSION = 22
 SCHEMAS = {
-    "evidential": "p2b-three-region-evidential-v3",
-    "bce": "p2b-three-region-bce-v3",
+    "evidential": "p2b-three-region-evidential-v5",
+    "bce": "p2b-three-region-bce-v5",
 }
 
 
@@ -126,7 +127,20 @@ def _loss_weights(training: dict) -> P2BLossWeights:
     return P2BLossWeights(
         observed_gate_pixel=float(training.get("observed_gate_pixel_weight", 1.0)),
         guessed_pixel=float(training.get("guessed_pixel_weight", 1.0)),
-        wrong_evidence_kl=float(training.get("wrong_evidence_kl_weight", 0.0)),
+        guessed_surface=float(training.get("guessed_surface_weight", 0.5)),
+        guessed_free=float(training.get("guessed_free_weight", 0.35)),
+        guessed_visible_surface=float(
+            training.get("guessed_visible_surface_weight", 0.40)
+        ),
+        guessed_hidden_occupied=float(
+            training.get("guessed_hidden_occupied_weight", 0.25)
+        ),
+        wrong_evidence_kl=float(
+            training.get(
+                "wrong_evidence_kl_weight",
+                0.005 if training.get("pipeline") == "P2B-NLL" else 0.0,
+            )
+        ),
         support_bce=float(training.get("support_bce_weight", 0.5)),
         support_dice=float(training.get("support_dice_weight", 0.5)),
     )
@@ -159,6 +173,22 @@ def step_losses(
             global_step,
             total_steps,
             maximum=1.0,
+            zero_fraction=float(
+                training.get("wrong_evidence_zero_fraction", 0.20)
+            ),
+            ramp_fraction=float(
+                training.get("wrong_evidence_ramp_fraction", 0.10)
+            ),
+        )
+        hidden_occupied_scale = hidden_occupied_supervision_weight(
+            global_step,
+            total_steps,
+            zero_fraction=float(
+                training.get("hidden_occupied_zero_fraction", 0.10)
+            ),
+            ramp_fraction=float(
+                training.get("hidden_occupied_ramp_fraction", 0.15)
+            ),
         )
         for branch in branches:
             branch_loss = p2b_bev_loss(
@@ -169,6 +199,7 @@ def step_losses(
                 probability_model=probability_model,
                 weights=_loss_weights(training),
                 wrong_evidence_scale=kl_scale,
+                hidden_occupied_scale=hidden_occupied_scale,
             )
             task_weight = float(training[f"{branch}_task_weight"])
             bev_total = bev_total + task_weight * branch_loss["loss"]
@@ -206,6 +237,11 @@ def checkpoint_contract(config: dict, manifest_sha256: str) -> dict:
         "manifest_sha256": manifest_sha256,
         "runtime_inputs": ["rgb_window"],
         "bev_architecture": "observed-free-gate-plus-guessed-binary-completion",
+        "loss_contract": "legacy-balanced-gate-guessed-only-surface-v2",
+        "gate_loss": "per-sample-1to1-observed-free-vs-all-guessed",
+        "surface_gradient_scope": "guessed-expert-only",
+        "surface_target": "visible-target-equals-occupied",
+        "hidden_occupied_curriculum": "0:10pct-ramp:10to25pct-full:25pct",
         "routing_classes": [
             "observed_free",
             "guessed_free",

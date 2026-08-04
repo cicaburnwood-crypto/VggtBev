@@ -89,6 +89,17 @@ def p2b_metric_totals(
     observed_gate_fn = (
         masks.valid & ~observed_gate_predicted & observed_gate_truth
     ).sum()
+    surface_gate_predicted = ~observed_gate_predicted
+    direct_band = masks.observed_free | masks.visible_surface
+    surface_gate_tp = (
+        direct_band & surface_gate_predicted & masks.visible_surface
+    ).sum()
+    surface_gate_fp = (
+        direct_band & surface_gate_predicted & masks.observed_free
+    ).sum()
+    surface_gate_fn = (
+        direct_band & ~surface_gate_predicted & masks.visible_surface
+    ).sum()
 
     guessed_probability = prediction["guessed"]["occupancy_probability"].float()
     guessed_predicted = guessed_probability >= 0.5
@@ -97,11 +108,23 @@ def p2b_metric_totals(
     guessed_fp = (masks.guessed & guessed_predicted & ~guessed_truth).sum()
     guessed_fn = (masks.guessed & ~guessed_predicted & guessed_truth).sum()
     guessed_tn = (masks.guessed & ~guessed_predicted & ~guessed_truth).sum()
+    hidden_guessed_tp = (
+        masks.hidden_guessed & guessed_predicted & masks.hidden_guessed_occupied
+    ).sum()
+    hidden_guessed_fp = (
+        masks.hidden_guessed & guessed_predicted & ~masks.hidden_guessed_occupied
+    ).sum()
+    hidden_guessed_fn = (
+        masks.hidden_guessed & ~guessed_predicted & masks.hidden_guessed_occupied
+    ).sum()
 
     fused_probability = prediction["fused"]["occupancy_probability"].float()
     fused_predicted = fused_probability >= 0.5
     observed_free_fp = (masks.observed_free & fused_predicted).sum()
     observed_free_count = masks.observed_free.sum()
+    fused_surface_tp = (masks.visible_surface & fused_predicted).sum()
+    fused_surface_fp = (masks.observed_free & fused_predicted).sum()
+    fused_surface_fn = (masks.visible_surface & ~fused_predicted).sum()
 
     support_predicted = prediction["fov_support_probability"] >= 0.5
     support_tp = (support_predicted & masks.valid).sum()
@@ -131,6 +154,15 @@ def p2b_metric_totals(
         "observed_gate_tp": count(observed_gate_tp),
         "observed_gate_fp": count(observed_gate_fp),
         "observed_gate_fn": count(observed_gate_fn),
+        "surface_gate_tp": count(surface_gate_tp),
+        "surface_gate_fp": count(surface_gate_fp),
+        "surface_gate_fn": count(surface_gate_fn),
+        "fused_surface_tp": count(fused_surface_tp),
+        "fused_surface_fp": count(fused_surface_fp),
+        "fused_surface_fn": count(fused_surface_fn),
+        "hidden_guessed_tp": count(hidden_guessed_tp),
+        "hidden_guessed_fp": count(hidden_guessed_fp),
+        "hidden_guessed_fn": count(hidden_guessed_fn),
         "support_tp": count(support_tp),
         "support_fp": count(support_fp),
         "support_fn": count(support_fn),
@@ -172,6 +204,10 @@ def finalize_p2b_metrics(totals: dict[str, float]) -> dict[str, float]:
     guessed_recall = _safe_ratio(
         totals["guessed_tp"], totals["guessed_tp"] + totals["guessed_fn"]
     )
+    surface_precision = precision("fused_surface")
+    surface_recall = recall("fused_surface")
+    hidden_precision = precision("hidden_guessed")
+    hidden_recall = recall("hidden_guessed")
     routing_ious = [
         iou("routing_free"),
         iou("routing_guessed_free"),
@@ -185,6 +221,15 @@ def finalize_p2b_metrics(totals: dict[str, float]) -> dict[str, float]:
             precision("observed_gate") + recall("observed_gate"),
         ),
         "observed_gate_iou": iou("observed_gate"),
+        "surface_gate_precision": precision("surface_gate"),
+        "surface_gate_recall": recall("surface_gate"),
+        "visible_surface_precision": surface_precision,
+        "visible_surface_recall": surface_recall,
+        "visible_surface_f1": _safe_ratio(
+            2.0 * surface_precision * surface_recall,
+            surface_precision + surface_recall,
+        ),
+        "visible_surface_iou": iou("fused_surface"),
         "observed_free_false_occupied_rate": _safe_ratio(
             totals["observed_free_fp"], totals["observed_free_count"]
         ),
@@ -200,6 +245,13 @@ def finalize_p2b_metrics(totals: dict[str, float]) -> dict[str, float]:
             2.0 * guessed_precision * guessed_recall,
             guessed_precision + guessed_recall,
         ),
+        "hidden_occupied_precision": hidden_precision,
+        "hidden_occupied_recall": hidden_recall,
+        "hidden_occupied_f1": _safe_ratio(
+            2.0 * hidden_precision * hidden_recall,
+            hidden_precision + hidden_recall,
+        ),
+        "hidden_occupied_iou": iou("hidden_guessed"),
         "guessed_region_iou": iou("routing_guessed"),
         "routing_mean_iou": sum(routing_ious) / len(routing_ious),
         "support_iou": _safe_ratio(

@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>P2B Ranked Session Explorer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1119;
+      --panel: #111a25;
+      --panel-2: #172231;
+      --line: #2a394b;
+      --text: #edf4fb;
+      --muted: #93a4b7;
+      --blue: #69c6ff;
+      --green: #72df96;
+      --amber: #ffcb6b;
+      --red: #ff7777;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top left, #132335 0, var(--bg) 40%);
+      color: var(--text);
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(11, 17, 25, .94);
+      backdrop-filter: blur(12px);
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 20px; letter-spacing: .02em; }
+    h2 { font-size: 17px; }
+    .subtitle, .muted { color: var(--muted); }
+    .status {
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--amber);
+      white-space: nowrap;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(540px, .9fr) minmax(720px, 1.35fr);
+      gap: 16px;
+      padding: 16px;
+    }
+    .card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(17, 26, 37, .96);
+      box-shadow: 0 14px 40px rgba(0,0,0,.22);
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-2);
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1.6fr .7fr 1fr 1.4fr .7fr;
+      gap: 10px;
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+    input, select, button {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0e1722;
+      color: var(--text);
+      font: inherit;
+    }
+    button { cursor: pointer; }
+    button:hover { border-color: var(--blue); }
+    button:disabled { cursor: default; opacity: .45; }
+    .search-row, .page-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 0 14px 14px;
+    }
+    .search-row input { flex: 1; }
+    .search-row button { width: 92px; }
+    .page-row { justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .page-buttons { display: flex; gap: 7px; }
+    .page-buttons button { width: auto; min-width: 72px; }
+    .rank-jump { display: flex; gap: 7px; align-items: center; }
+    .rank-jump input { width: 105px; }
+    .rank-jump button { width: auto; }
+    .table-wrap { max-height: calc(100vh - 310px); overflow: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 9px 10px;
+      text-align: left;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      background: #121d2a;
+      border-bottom: 1px solid var(--line);
+    }
+    td { padding: 9px 10px; border-bottom: 1px solid #202d3c; vertical-align: top; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover { background: #18283a; }
+    tbody tr.active { background: #17314a; box-shadow: inset 3px 0 var(--blue); }
+    .session-key { max-width: 250px; word-break: break-word; font-size: 12px; }
+    .number { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .pill.selected { color: var(--green); border-color: #2e6e49; }
+    .detail { min-height: 500px; }
+    .placeholder { padding: 56px 30px; text-align: center; color: var(--muted); }
+    .detail-body { padding: 14px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
+    .visual-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(200px, 1fr));
+      gap: 10px;
+    }
+    figure {
+      margin: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0b1118;
+    }
+    figure img { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; image-rendering: pixelated; }
+    figcaption { padding: 8px 10px; color: var(--muted); border-top: 1px solid var(--line); }
+    .rgb-section, .metrics-grid { margin-top: 14px; }
+    .rgb-strip { display: flex; gap: 8px; overflow-x: auto; padding-top: 9px; }
+    .rgb-frame { flex: 0 0 170px; }
+    .rgb-frame img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
+    .rgb-frame div { margin-top: 4px; color: var(--muted); text-align: center; }
+    .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .metric-box { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .metric-box h3 { padding: 9px 11px; background: var(--panel-2); font-size: 13px; }
+    .metric-list { max-height: 330px; overflow: auto; }
+    .metric {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      padding: 6px 10px;
+      border-top: 1px solid #202d3c;
+    }
+    .metric span:first-child { color: var(--muted); overflow-wrap: anywhere; }
+    .metric span:last-child { font-variant-numeric: tabular-nums; }
+    .error { padding: 14px; color: var(--red); }
+    @media (max-width: 1250px) {
+      main { grid-template-columns: 1fr; }
+      .table-wrap { max-height: 520px; }
+    }
+    @media (max-width: 760px) {
+      header { align-items: flex-start; }
+      .controls { grid-template-columns: 1fr 1fr; }
+      .visual-grid, .metrics-grid { grid-template-columns: 1fr; }
+      main { padding: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>P2B Ranked Session Explorer</h1>
+      <p id="subtitle" class="subtitle">Loading remote 60K sweep index…</p>
+    </div>
+    <div id="status" class="status">Connecting</div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="card-head">
+        <h2>Ranked sessions</h2>
+        <span id="count" class="muted">—</span>
+      </div>
+      <div class="controls">
+        <label>Sort metric<select id="sort"></select></label>
+        <label>Direction<select id="direction"><option value="asc">Ascending</option><option value="desc">Descending</option></select></label>
+        <label>Subset<select id="subset"><option value="all">All 60K</option><option value="selected">Selected top 36K</option><option value="unselected">Unselected 24K</option><option value="train">Original train split</option><option value="validation">Original validation split</option></select></label>
+        <label>Rows per page<select id="pageSize"><option>25</option><option selected>50</option><option>100</option><option>200</option></select></label>
+        <label>Current sort value<input id="sortValue" readonly value="—"></label>
+      </div>
+      <div class="search-row">
+        <input id="query" placeholder="Search session, scene or split">
+        <button id="search">Search</button>
+        <button id="clear">Clear</button>
+      </div>
+      <div class="page-row">
+        <div class="page-buttons">
+          <button id="previous">Previous</button>
+          <button id="next">Next</button>
+        </div>
+        <span id="pageLabel" class="muted">Page —</span>
+        <div class="rank-jump">
+          <input id="rank" type="number" min="1" max="60000" placeholder="Rank">
+          <button id="jump">Jump in current sort</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Rank</th><th>Session</th><th>Scene / split</th><th>Value</th><th>History</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card detail">
+      <div class="card-head"><h2>GT / model comparison</h2><span id="detailStatus" class="muted">No session selected</span></div>
+      <div id="detail" class="placeholder">Click any ranked session. RGB, GT and inference are loaded remotely only after selection.</div>
+    </section>
+  </main>
+
+  <script>
+    const state = { sort: '', direction: 'asc', subset: 'all', query: '', page: 1, pageSize: 50, total: 0, filtered: 0, rows: [], active: '' };
+    const $ = id => document.getElementById(id);
+
+    async function request(path, params = {}) {
+      const query = new URLSearchParams(params);
+      const response = await fetch(query.size ? `${path}?${query}` : path, {cache: 'no-store'});
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    }
+
+    function format(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+      const number = Number(value);
+      if (!Number.isFinite(number)) return String(value);
+      if (Math.abs(number) >= 10000) return number.toLocaleString();
+      if (Math.abs(number) > 0 && Math.abs(number) < 0.0001) return number.toExponential(3);
+      return number.toFixed(5).replace(/0+$/, '').replace(/\.$/, '');
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[character]);
+    }
+
+    function metricRows(metrics) {
+      return Object.entries(metrics || {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) =>
+        `<div class="metric"><span>${escapeHtml(name.replaceAll('_', ' '))}</span><span>${escapeHtml(format(value))}</span></div>`
+      ).join('') || '<div class="metric"><span>No metrics</span><span>—</span></div>';
+    }
+
+    async function loadMeta() {
+      const meta = await request('/api/meta');
+      state.sort = meta.default_sort;
+      $('sort').innerHTML = meta.sort_fields.map(field => `<option value="${field.name}">${field.label}</option>`).join('');
+      $('sort').value = state.sort;
+      $('subtitle').textContent = `${meta.sessions.toLocaleString()} sessions · epoch ${meta.checkpoint_epoch} / step ${meta.checkpoint_global_step} · lazy remote loading · ${meta.single_grid.extent_m} m / ${meta.single_grid.size}²`;
+      $('status').textContent = `Remote ready · cache ${meta.cached_sessions}`;
+      $('status').style.color = 'var(--green)';
+      await loadPage();
+      const requestedSession = new URLSearchParams(window.location.search).get('session_key');
+      if (requestedSession) await openSession(requestedSession);
+    }
+
+    async function loadPage() {
+      $('status').textContent = 'Loading ranking…';
+      const payload = await request('/api/sessions', {
+        sort: state.sort,
+        direction: state.direction,
+        subset: state.subset,
+        query: state.query,
+        page: state.page,
+        page_size: state.pageSize,
+      });
+      state.rows = payload.rows;
+      state.total = payload.total_sessions;
+      state.filtered = payload.total_filtered;
+      const pages = Math.max(1, Math.ceil(state.filtered / state.pageSize));
+      $('count').textContent = `${state.filtered.toLocaleString()} / ${state.total.toLocaleString()}`;
+      $('pageLabel').textContent = `Page ${state.page.toLocaleString()} / ${pages.toLocaleString()}`;
+      $('previous').disabled = state.page <= 1;
+      $('next').disabled = state.page >= pages;
+      $('rows').innerHTML = state.rows.map(row => `
+        <tr data-key="${row.session_key}" class="${row.session_key === state.active ? 'active' : ''}">
+          <td class="number">${row.rank.toLocaleString()}</td>
+          <td class="session-key">${escapeHtml(row.session_key)}<br><span class="pill ${row.selected_for_retraining ? 'selected' : ''}">${row.selected_for_retraining ? 'top 36K' : 'not selected'}</span></td>
+          <td>${escapeHtml(row.scene_key)}<br><span class="muted">${escapeHtml(row.source_split)}</span></td>
+          <td class="number">${format(row.sort_value)}</td>
+          <td class="number">${row.history_frame_count} frames<br><span class="muted">ref ${row.reference_frame_id}</span></td>
+        </tr>`).join('');
+      document.querySelectorAll('#rows tr').forEach(row => row.addEventListener('click', () => openSession(row.dataset.key)));
+      $('status').textContent = 'Remote ready';
+      $('status').style.color = 'var(--green)';
+      return payload;
+    }
+
+    async function openSession(sessionKey) {
+      state.active = sessionKey;
+      document.querySelectorAll('#rows tr').forEach(row => row.classList.toggle('active', row.dataset.key === sessionKey));
+      const listed = state.rows.find(row => row.session_key === sessionKey);
+      $('sortValue').value = listed ? format(listed.sort_value) : '—';
+      $('detailStatus').textContent = 'Reading remote frames and running RGB-only inference…';
+      $('detail').className = 'placeholder';
+      $('detail').textContent = 'Loading only this session from remote_gpu. The first request can take longer while the model warms up.';
+      try {
+        const payload = await request('/api/session', {session_key: sessionKey});
+        const images = payload.images;
+        $('detailStatus').textContent = `${payload.inference_seconds.toFixed(2)} s inference`;
+        $('detail').className = 'detail-body';
+        $('detail').innerHTML = `
+          <div class="chips">
+            <span class="pill">${escapeHtml(payload.session_key)}</span><span class="pill">${escapeHtml(payload.scene_key)}</span><span class="pill">${escapeHtml(payload.source_split)}</span>
+            <span class="pill ${payload.selected_for_retraining ? 'selected' : ''}">${payload.selected_for_retraining ? 'selected top 36K' : 'not selected'}</span>
+            <span class="pill">${payload.history_frame_count} RGB frames</span><span class="pill">HFOV ${payload.camera.horizontal_fov_degrees.toFixed(1)}°</span>
+            <span class="pill">height ${payload.camera.camera_height_m.toFixed(3)} m</span><span class="pill">λ ${format(payload.lambda_m_per_vggt)} m/VGGT-unit</span>
+          </div>
+          <div class="visual-grid">
+            <figure><img src="data:image/png;base64,${images.gt_fov_complete_png_base64}"><figcaption>GT · complete occupancy inside FOV</figcaption></figure>
+            <figure><img src="data:image/png;base64,${images.model_semantic_png_base64}"><figcaption>Model · fused semantic</figcaption></figure>
+            <figure><img src="data:image/png;base64,${images.model_confidence_png_base64}"><figcaption>Model · evidential confidence</figcaption></figure>
+            <figure><img src="data:image/png;base64,${images.gt_masked_png_base64}"><figcaption>GT · masked direct observation</figcaption></figure>
+            <figure><img src="data:image/png;base64,${images.observed_gate_png_base64}"><figcaption>Model · Observed-Free Gate probability</figcaption></figure>
+            <figure><img src="data:image/png;base64,${images.guessed_occupancy_png_base64}"><figcaption>Model · guessed occupancy probability</figcaption></figure>
+          </div>
+          <div class="rgb-section"><h3>RGB runtime window</h3><div class="rgb-strip">${payload.rgb_frames.map(frame => `<div class="rgb-frame"><img src="data:image/jpeg;base64,${frame.jpeg_base64}"><div>frame ${frame.frame_id}</div></div>`).join('')}</div></div>
+          <div class="metrics-grid">
+            <div class="metric-box"><h3>Previous sweep record</h3><div class="metric-list">${metricRows(payload.sweep_metrics)}</div></div>
+            <div class="metric-box"><h3>Live recomputed metrics</h3><div class="metric-list">${metricRows(payload.live_metrics)}</div></div>
+          </div>`;
+      } catch (error) {
+        $('detailStatus').textContent = 'Failed';
+        $('detail').className = 'error';
+        $('detail').textContent = error.message;
+      }
+    }
+
+    async function refreshFromControls() {
+      state.sort = $('sort').value;
+      state.direction = $('direction').value;
+      state.subset = $('subset').value;
+      state.pageSize = Number($('pageSize').value);
+      state.page = 1;
+      await loadPage();
+    }
+
+    $('sort').addEventListener('change', refreshFromControls);
+    $('direction').addEventListener('change', refreshFromControls);
+    $('subset').addEventListener('change', refreshFromControls);
+    $('pageSize').addEventListener('change', refreshFromControls);
+    $('search').addEventListener('click', async () => { state.query = $('query').value.trim(); state.page = 1; await loadPage(); });
+    $('clear').addEventListener('click', async () => { $('query').value = ''; state.query = ''; state.page = 1; await loadPage(); });
+    $('query').addEventListener('keydown', event => { if (event.key === 'Enter') $('search').click(); });
+    $('previous').addEventListener('click', async () => { if (state.page > 1) { state.page -= 1; await loadPage(); } });
+    $('next').addEventListener('click', async () => { state.page += 1; await loadPage(); });
+    $('jump').addEventListener('click', async () => {
+      const rank = Number($('rank').value);
+      if (!Number.isInteger(rank) || rank < 1 || rank > state.total) return alert('Enter a rank from 1 to 60,000.');
+      if (state.query || state.subset !== 'all') return alert('Rank jump uses the complete current sort. Clear search and select All 60K first.');
+      state.page = Math.ceil(rank / state.pageSize);
+      await loadPage();
+      const row = state.rows.find(item => item.rank === rank);
+      if (row) await openSession(row.session_key);
+    });
+
+    loadMeta().catch(error => {
+      $('status').textContent = 'Connection failed';
+      $('status').style.color = 'var(--red)';
+      $('detail').className = 'error';
+      $('detail').textContent = error.message;
+    });
+  </script>
+</body>
+</html>

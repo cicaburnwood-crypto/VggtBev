@@ -28,7 +28,10 @@ class ComparisonFrame:
     frame_seq: int
     motion_step: int
     camera_rgb: np.ndarray
-    gt_masked_by_model: dict[str, np.ndarray]
+    gt_complete_by_model: dict[str, np.ndarray]
+    gt_observed_by_model: dict[str, np.ndarray]
+    gt_guessed_by_model: dict[str, np.ndarray]
+    gt_merged_observed_by_model: dict[str, np.ndarray]
 
 
 def runtime_request_payload(
@@ -259,14 +262,42 @@ class ModelComparisonWorker:
                     latest_models[model_key] = {
                         "extent_m": extent_m,
                         "gt_png_base64": encode_png_base64(
-                            frame.gt_masked_by_model[model_key]
+                            frame.gt_complete_by_model[model_key]
+                        ),
+                        "gt_complete_png_base64": encode_png_base64(
+                            frame.gt_complete_by_model[model_key]
+                        ),
+                        "gt_observed_png_base64": encode_png_base64(
+                            frame.gt_observed_by_model[model_key]
+                        ),
+                        "gt_guessed_png_base64": encode_png_base64(
+                            frame.gt_guessed_by_model[model_key]
+                        ),
+                        "gt_merged_observed_png_base64": encode_png_base64(
+                            frame.gt_merged_observed_by_model[model_key]
                         ),
                         "predicted_png_base64": prediction[
                             "model_single_png_base64"
                         ],
-                        "confidence_single_png_base64": prediction[
+                        "predicted_merged_png_base64": prediction.get(
+                            "model_merged_png_base64"
+                        ),
+                        "merged_score_png_base64": prediction.get(
+                            "merged_score_png_base64"
+                        ),
+                        "confidence_single_png_base64": prediction.get(
                             "confidence_single_png_base64"
-                        ],
+                        ),
+                        "observed_gate_single_png_base64": prediction.get(
+                            "observed_gate_single_png_base64"
+                        ),
+                        "observed_gate_confidence_png_base64": prediction.get(
+                            "observed_gate_confidence_png_base64"
+                        ),
+                        "guessed_occupancy_confidence_png_base64": prediction.get(
+                            "guessed_occupancy_confidence_png_base64",
+                            prediction.get("guessed_confidence_png_base64"),
+                        ),
                         "depth_scale": float(prediction["depth_scale"]),
                         "scale_std_m_per_vggt": float(
                             prediction["scale_std_m_per_vggt"]
@@ -279,6 +310,18 @@ class ModelComparisonWorker:
                         ),
                         "merged_enabled": bool(
                             prediction["merged_enabled"]
+                        ),
+                        "merged_extent_m": float(
+                            prediction.get("merged_extent_m", 0.0)
+                        ),
+                        "merged_output_size": int(
+                            prediction.get("merged_output_size", 0)
+                        ),
+                        "merged_latent_size": int(
+                            prediction.get("merged_latent_size", 0)
+                        ),
+                        "visualization_mode": prediction.get(
+                            "visualization_mode", "p2b"
                         ),
                         "checkpoint_epoch": int(
                             prediction["checkpoint_epoch"]

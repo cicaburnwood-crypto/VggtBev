@@ -14,5 +14,7 @@ config=${P2B_CONFIG:-"$project_root/configs/p2b_active_remote_gpu.toml"}
 
 mkdir -p "$project_root/logs"
 cd "$project_root"
+export PYTHONPATH="$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
+"$environment/bin/python" -c 'import pathlib, sys, vggt_bev_method1; expected=(pathlib.Path(sys.argv[1])/"src").resolve(); actual=pathlib.Path(vggt_bev_method1.__file__).resolve(); assert actual.is_relative_to(expected), f"wrong P2B package: {actual}"' "$project_root"
 exec "$environment/bin/python" -m vggt_bev_method1.cli_train_p2b \
   --config "$config"

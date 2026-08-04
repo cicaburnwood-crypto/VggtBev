@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BEV Video Visualizer</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070b10;--panel:#111821;--panel2:#0b1118;--line:#293646;--text:#edf4f8;--muted:#91a2b2;--green:#39e796;--cyan:#54cfff;--red:#ff5968;--amber:#ffc65c}
+    *{box-sizing:border-box} body{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 0,#172a40 0,transparent 34rem),var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}
+    header{min-height:66px;padding:12px 22px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:rgba(7,11,16,.93)}
+    .brand{display:flex;align-items:center;gap:11px}.logo{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(135deg,var(--green),var(--cyan));color:#07120e;font-weight:900}h1,p{margin:0}h1{font-size:18px}.subtitle{color:var(--muted);font-size:12px;margin-top:2px}.connection{display:flex;align-items:center;gap:8px;color:var(--muted)}.dot{width:9px;height:9px;border-radius:50%;background:var(--amber)}.dot.online{background:var(--green);box-shadow:0 0 13px var(--green)}
+    main{width:min(1900px,100%);margin:auto;padding:18px;display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px;align-items:start}.card{overflow:hidden;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,rgba(21,29,39,.98),rgba(11,16,23,.98));box-shadow:0 18px 42px rgba(0,0,0,.28)}.head{min-height:54px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);font-weight:750}.tag{font-size:11px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);padding:4px 9px;border-radius:999px}
+    .selectors{display:grid;gap:12px;padding:15px;border-bottom:1px solid var(--line)}label{display:grid;gap:6px;color:var(--muted);font-size:12px}select{width:100%;padding:9px 10px;border:1px solid #3b4c60;border-radius:8px;color:var(--text);background:#0a1119}select:disabled{opacity:.55}.controls{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:9px;border-bottom:1px solid var(--line)}button{padding:11px 8px;border:1px solid #3a4a5d;border-radius:9px;color:var(--text);background:#121e2a;font:inherit;font-weight:700;cursor:pointer}button:hover:not(:disabled),button.active{border-color:var(--cyan);background:#16334a}button.stop{color:#ff9aa3}button:disabled{opacity:.4;cursor:not-allowed}.progress-shell{margin:0 15px 15px;height:5px;border-radius:99px;overflow:hidden;background:#263241}.progress{height:100%;width:0;background:linear-gradient(90deg,var(--green),var(--cyan));transition:width .2s}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 15px 15px}.metric{min-width:0;padding:10px;border-radius:9px;background:#0a1017}.metric-name{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#7290a8}.metric-value{margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.panel{min-width:0;margin:0;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}.panel:nth-child(3n){border-right:0}.view{position:relative;display:grid;place-items:center;min-height:300px;background:#06090d}.view img{position:relative;z-index:1;display:block;width:100%;height:100%;max-height:38vh;object-fit:contain}.view.source img{aspect-ratio:16/9}.view.bev img{aspect-ratio:1}.label{position:absolute;z-index:2;left:10px;bottom:10px;padding:5px 8px;border-radius:7px;background:rgba(8,12,17,.88);color:#a9bbca;font-size:12px}figcaption{padding:11px 13px;text-align:center;font-weight:750;color:var(--cyan);background:#0b1118}.empty{position:absolute;color:#526273;font-size:13px}.error{padding:0 15px 15px;color:#ff8791;min-height:20px;word-break:break-word}
+    @media(max-width:1100px){main{grid-template-columns:1fr}.grid{grid-template-columns:1fr}.panel{border-right:0}.view{min-height:280px}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><div class="logo">V</div><div><h1>BEV Video Visualizer</h1><p class="subtitle">Live RGB temporal inference</p></div></div>
+    <div class="connection"><span id="dot" class="dot"></span><span id="connection">Connecting</span></div>
+  </header>
+  <main>
+    <section class="card">
+      <div class="head"><span>Playback</span><span id="statusTag" class="tag">Starting</span></div>
+      <div class="selectors">
+        <label>Archive<select id="archive" disabled><option>Loading…</option></select></label>
+        <label>Ride<select id="ride" disabled><option>Select archive</option></select></label>
+      </div>
+      <div class="controls">
+        <button id="replay" disabled>↻ Replay from start</button>
+        <button id="reverse" disabled>◀ Reverse</button>
+        <button id="stop" class="stop" disabled>■ Stop</button>
+        <button id="forward" disabled>Forward ▶</button>
+      </div>
+      <div class="progress-shell"><div id="progress" class="progress"></div></div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-name">Direction</div><div id="direction" class="metric-value">—</div></div>
+        <div class="metric"><div class="metric-name">Frame</div><div id="frame" class="metric-value">—</div></div>
+        <div class="metric"><div class="metric-name">Source time</div><div id="sourceTime" class="metric-value">—</div></div>
+        <div class="metric"><div class="metric-name">History</div><div id="history" class="metric-value">—</div></div>
+        <div class="metric"><div class="metric-name">Inference</div><div id="inference" class="metric-value">—</div></div>
+        <div class="metric"><div class="metric-name">Scale</div><div id="scale" class="metric-value">—</div></div>
+      </div>
+      <div id="error" class="error"></div>
+    </section>
+
+    <section class="card">
+      <div class="head"><span>Runtime output</span><span id="modelTag" class="tag">Waiting</span></div>
+      <div class="grid">
+        <figure class="panel"><div class="view source"><span class="empty">Video frame</span><img id="rgb"><span class="label">RGB</span></div><figcaption>Front camera</figcaption></figure>
+        <figure class="panel"><div class="view bev"><span class="empty">Model output</span><img id="semantic"><span id="singleLabel" class="label">red line = Gate</span></div><figcaption id="singleCaption">Complete semantic</figcaption></figure>
+        <figure class="panel"><div class="view bev"><span class="empty">Model output</span><img id="confidence"><span class="label">brighter = higher confidence</span></div><figcaption>Overall evidential confidence</figcaption></figure>
+        <figure class="panel"><div class="view bev"><span class="empty">Model output</span><img id="gate"><span class="label">white = observed-free route</span></div><figcaption>Observed Gate</figcaption></figure>
+        <figure class="panel"><div class="view bev"><span class="empty">Model output</span><img id="observed"><span id="secondaryLabel" class="label">brighter = higher confidence</span></div><figcaption id="secondaryCaption">Observed Gate confidence</figcaption></figure>
+        <figure class="panel"><div class="view bev"><span class="empty">Model output</span><img id="guessed"><span id="tertiaryLabel" class="label">red occupied · green free</span></div><figcaption id="tertiaryCaption">Guessed occupancy confidence</figcaption></figure>
+      </div>
+    </section>
+  </main>
+  <script>
+    const archive=document.getElementById('archive'),ride=document.getElementById('ride');
+    const forward=document.getElementById('forward'),reverse=document.getElementById('reverse'),stopButton=document.getElementById('stop'),replayButton=document.getElementById('replay');
+    let imageVersion=-1,frameSeq=-1,busy=false;
+    async function json(url,options={}){const response=await fetch(url,{cache:'no-store',...options});const payload=await response.json();if(!response.ok)throw new Error(payload.error||response.statusText);return payload}
+    async function post(url,payload={}){return json(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})}
+    async function selectRide(){if(!archive.value||!ride.value)return;const current=await json('/api/state');if(current.archive===archive.value&&current.track_id===ride.value&&(current.ready||current.loading))return;busy=true;archive.disabled=true;ride.disabled=true;await post('/api/select',{archive:archive.value,track_id:ride.value});busy=false}
+    async function loadRides(){busy=true;archive.disabled=true;ride.disabled=true;const payload=await json(`/api/tracks?archive=${encodeURIComponent(archive.value)}`);if(!payload.tracks.length)throw new Error('No front-camera rides');ride.innerHTML=payload.tracks.map(track=>`<option value="${track.id}">${track.label}</option>`).join('');const shortest=payload.tracks.reduce((a,b)=>a.duration_seconds<=b.duration_seconds?a:b);ride.value=shortest.id;archive.disabled=false;ride.disabled=false;busy=false;await selectRide()}
+    async function initialize(){const payload=await json('/api/archives');archive.innerHTML=payload.archives.map(item=>`<option value="${item.id}">${item.label}</option>`).join('');archive.disabled=false;await loadRides()}
+    archive.addEventListener('change',()=>loadRides().catch(showError));ride.addEventListener('change',()=>selectRide().catch(showError));
+    forward.addEventListener('click',()=>post('/api/play',{direction:'forward'}).catch(showError));reverse.addEventListener('click',()=>post('/api/play',{direction:'reverse'}).catch(showError));stopButton.addEventListener('click',()=>post('/api/stop').catch(showError));replayButton.addEventListener('click',()=>post('/api/replay').catch(showError));
+    function showError(error){busy=false;document.getElementById('error').textContent=error.message||String(error)}
+    function formatTime(seconds){if(!Number.isFinite(seconds))return'—';const m=Math.floor(seconds/60),s=seconds-m*60;return`${m}:${s.toFixed(1).padStart(4,'0')}`}
+    function applyModelLabels(model){const legacy=model.visualization_mode==='legacy_masked_dual';document.getElementById('singleCaption').textContent=legacy?'Single masked BEV':'Complete semantic';document.getElementById('singleLabel').textContent=legacy?'6.5 m · masked-only':'red line = Gate';document.getElementById('secondaryCaption').textContent=legacy?'Merged masked BEV':'Observed Gate confidence';document.getElementById('secondaryLabel').textContent=legacy?'10 m · direct temporal decode':'brighter = higher confidence';document.getElementById('tertiaryCaption').textContent=legacy?'Merged categorical score':'Guessed occupancy confidence';document.getElementById('tertiaryLabel').textContent=legacy?'softmax score · not evidential':'red occupied · green free'}
+    async function poll(){try{const state=await json('/api/state');document.getElementById('dot').classList.add('online');document.getElementById('connection').textContent='Runtime connected';document.getElementById('statusTag').textContent=state.status;document.getElementById('error').textContent=state.error||'';document.getElementById('progress').style.width=`${Math.round(100*(state.loading?state.loading_progress:state.ready?1:0))}%`;document.getElementById('direction').textContent=state.direction_name;document.getElementById('frame').textContent=state.frame_index==null?`— / ${state.frame_count||0}`:`${state.frame_index+1} / ${state.frame_count}`;document.getElementById('sourceTime').textContent=formatTime(state.source_time_seconds);document.getElementById('history').textContent=`${state.history_frame_count}/${state.max_history}`;document.getElementById('inference').textContent=Number.isFinite(state.inference_seconds)?`${state.inference_seconds.toFixed(2)} s`:'—';document.getElementById('scale').textContent=Number.isFinite(state.depth_scale)?`${state.depth_scale.toFixed(3)} ± ${state.scale_std_m_per_vggt.toFixed(3)}`:'—';const enabled=state.ready&&!state.loading;forward.disabled=!enabled;reverse.disabled=!enabled;stopButton.disabled=!enabled;replayButton.disabled=!enabled;forward.classList.toggle('active',state.direction>0);reverse.classList.toggle('active',state.direction<0);archive.disabled=busy||state.loading;ride.disabled=busy||state.loading;const model=state.model||{};applyModelLabels(model);document.getElementById('modelTag').textContent=model.checkpoint_epoch==null?(model.model||'BEV'):`${model.model||'BEV'} · epoch ${model.checkpoint_epoch} · step ${model.checkpoint_global_step}`;if(state.image_version!==imageVersion){imageVersion=state.image_version;document.getElementById('rgb').src=`/api/image/rgb.jpg?v=${imageVersion}`}if(state.frame_seq!==frameSeq&&state.frame_seq>0){frameSeq=state.frame_seq;document.getElementById('semantic').src=`/api/image/semantic.png?v=${frameSeq}`;document.getElementById('confidence').src=`/api/image/confidence.png?v=${frameSeq}`;document.getElementById('gate').src=`/api/image/gate.png?v=${frameSeq}`;document.getElementById('observed').src=`/api/image/observed.png?v=${frameSeq}`;document.getElementById('guessed').src=`/api/image/guessed.png?v=${frameSeq}`}}catch(error){document.getElementById('dot').classList.remove('online');document.getElementById('connection').textContent='Reconnecting'}}
+    initialize().catch(showError);setInterval(poll,300);poll();
+  </script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "selection": {
+    "source_manifest": "bev_audit_best36k_95_5_p2b_nll_single_v1.json",
+    "source_manifest_sha256": "f587bbfc610f2cf12d6991ea8f7fef68bce30bacd1799521585f1d9211ae9fdb",
+    "source_split": "validation",
+    "training_scene_overlap": 0,
+    "random_seed": 20260804,
+    "eligible_local_hm3d_scenes": 38,
+    "selected_scenes": 10
+  },
+  "scenes": [
+    {
+      "id": "hm3d:00484-fc7RfUCN5mY",
+      "label": "00484 · fc7RfUCN5mY",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00484-fc7RfUCN5mY/fc7RfUCN5mY.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00484-fc7RfUCN5mY/fc7RfUCN5mY.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00270-bDTsgcSK5Qr",
+      "label": "00270 · bDTsgcSK5Qr",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00270-bDTsgcSK5Qr/bDTsgcSK5Qr.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00270-bDTsgcSK5Qr/bDTsgcSK5Qr.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00615-PUNuHY5M7MS",
+      "label": "00615 · PUNuHY5M7MS",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00615-PUNuHY5M7MS/PUNuHY5M7MS.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00615-PUNuHY5M7MS/PUNuHY5M7MS.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00108-oStKKWkQ1id",
+      "label": "00108 · oStKKWkQ1id",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00108-oStKKWkQ1id/oStKKWkQ1id.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00108-oStKKWkQ1id/oStKKWkQ1id.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00211-hmRxh2mmzNC",
+      "label": "00211 · hmRxh2mmzNC",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00211-hmRxh2mmzNC/hmRxh2mmzNC.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00211-hmRxh2mmzNC/hmRxh2mmzNC.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00808-y9hTuugGdiq",
+      "label": "00808 · y9hTuugGdiq",
+      "scene": "/media/user/T9/scene_datasets/hm3d/val/00808-y9hTuugGdiq/y9hTuugGdiq.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/val/00808-y9hTuugGdiq/y9hTuugGdiq.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00593-m17UDpW3tHm",
+      "label": "00593 · m17UDpW3tHm",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00593-m17UDpW3tHm/m17UDpW3tHm.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00593-m17UDpW3tHm/m17UDpW3tHm.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00173-qZ4B7U6XE5Y",
+      "label": "00173 · qZ4B7U6XE5Y",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00173-qZ4B7U6XE5Y/qZ4B7U6XE5Y.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00173-qZ4B7U6XE5Y/qZ4B7U6XE5Y.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00141-iigzG1rtanx",
+      "label": "00141 · iigzG1rtanx",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00141-iigzG1rtanx/iigzG1rtanx.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00141-iigzG1rtanx/iigzG1rtanx.basis.navmesh"
+    },
+    {
+      "id": "hm3d:00761-s7kPJndncRy",
+      "label": "00761 · s7kPJndncRy",
+      "scene": "/media/user/T9/scene_datasets/hm3d/train/00761-s7kPJndncRy/s7kPJndncRy.basis.glb",
+      "navmesh": "/media/user/T9/scene_datasets/hm3d/train/00761-s7kPJndncRy/s7kPJndncRy.basis.navmesh"
+    }
+  ]
+}

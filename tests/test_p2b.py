@@ -19,7 +19,12 @@ from vggt_bev_method1.models.p2b_probability import (
     fuse_pixel_routing,
 )
 from vggt_bev_method1.p2b_config import load_p2b_config, validate_p2b_config
-from vggt_bev_method1.p2b_losses import P2BLossWeights, p2b_bev_loss
+from vggt_bev_method1.p2b_losses import (
+    P2BLossWeights,
+    hidden_occupied_supervision_weight,
+    p2b_bev_loss,
+    wrong_evidence_kl_weight,
+)
 from vggt_bev_method1.p2b_metrics import (
     finalize_p2b_metrics,
     p2b_metric_totals,
@@ -95,6 +100,23 @@ def test_pixel_routing_targets_are_mutually_exclusive() -> None:
         masks.guessed,
     )
     assert masks.guessed_occupied.sum() == 2
+    assert masks.visible_surface.sum() == 1
+    assert masks.hidden_guessed_occupied.sum() == 1
+    assert torch.equal(
+        masks.guessed_occupied,
+        masks.visible_surface | masks.hidden_guessed_occupied,
+    )
+    four_groups = torch.stack(
+        (
+            masks.observed_free,
+            masks.visible_surface,
+            masks.guessed_free,
+            masks.hidden_guessed_occupied,
+        ),
+        dim=0,
+    )
+    assert not bool((four_groups.sum(dim=0) > 1).any())
+    assert torch.equal(four_groups.any(dim=0), masks.valid)
     assert torch.equal(masks.observed_gate_target.bool(), masks.observed_free)
     assert torch.equal(
         masks.routing_target[masks.observed_free],
@@ -149,6 +171,167 @@ def test_pixel_loss_is_amp_safe() -> None:
     result["loss"].backward()
     assert torch.isfinite(result["observed_gate_pixel_bce"])
     assert all(value.grad is not None for value in leaves)
+
+
+def test_guessed_loss_uses_explicit_per_sample_group_weights() -> None:
+    complete, visible, support = _targets()
+    prediction, leaves = _prediction(complete.shape[-1], "bce")
+    # Each exact subset is reduced to one task mean before applying 35/40/25.
+    leaves[0].data.fill_(4.0)
+    result = p2b_bev_loss(
+        prediction,
+        complete,
+        visible,
+        support,
+        probability_model="bce",
+    )
+    expected_free = torch.nn.functional.softplus(torch.tensor(4.0))
+    expected_occupied = torch.nn.functional.softplus(torch.tensor(-4.0))
+    assert torch.allclose(
+        result["guessed_pixel_loss"],
+        0.35 * expected_free + 0.40 * expected_occupied + 0.25 * expected_occupied,
+    )
+    assert torch.allclose(result["guessed_free_pixel_loss"], expected_free)
+    assert torch.allclose(
+        result["visible_surface_occupied_pixel_loss"], expected_occupied
+    )
+    assert torch.allclose(
+        result["hidden_guessed_occupied_pixel_loss"], expected_occupied
+    )
+
+
+def test_missing_surface_and_occupied_groups_are_skipped() -> None:
+    complete, visible, support = _targets()
+    labels = LabelValues()
+    complete = complete.clone()
+    visible = visible.clone()
+    complete[complete == labels.occupied] = labels.free
+    visible[visible == labels.occupied] = labels.free
+    prediction, leaves = _prediction(complete.shape[-1], "bce")
+    leaves[0].data.fill_(2.0)
+    result = p2b_bev_loss(
+        prediction,
+        complete,
+        visible,
+        support,
+        probability_model="bce",
+    )
+    expected = torch.nn.functional.softplus(torch.tensor(2.0))
+    assert torch.allclose(result["guessed_pixel_loss"], expected)
+    assert result["visible_surface_occupied_pixel_loss"].item() == 0.0
+    assert result["hidden_guessed_occupied_pixel_loss"].item() == 0.0
+    assert result["guessed_surface_loss"].item() == 0.0
+
+
+def test_surface_loss_reaches_only_guessed_expert() -> None:
+    complete, visible, support = _targets()
+    prediction, leaves = _prediction(complete.shape[-1], "bce")
+    weights = P2BLossWeights(
+        observed_gate_pixel=0.0,
+        guessed_pixel=0.0,
+        guessed_surface=1.0,
+        wrong_evidence_kl=0.0,
+        support_bce=0.0,
+        support_dice=0.0,
+    )
+    result = p2b_bev_loss(
+        prediction,
+        complete,
+        visible,
+        support,
+        probability_model="bce",
+        weights=weights,
+    )
+    assert torch.allclose(
+        result["guessed_surface_loss"], torch.log(torch.tensor(2.0))
+    )
+    result["loss"].backward()
+    surface = p2b_region_masks(complete, visible, support).visible_surface
+    assert bool((leaves[0].grad[0, 0][surface[0]].abs() > 0).all())
+    assert leaves[1].grad is None or not bool((leaves[1].grad != 0).any())
+
+
+def test_surface_partition_does_not_change_legacy_gate_objective() -> None:
+    complete, visible, support = _targets()
+    prediction, leaves = _prediction(complete.shape[-1], "bce")
+    weights = P2BLossWeights(
+        observed_gate_pixel=1.0,
+        guessed_pixel=0.0,
+        guessed_surface=0.0,
+        wrong_evidence_kl=0.0,
+        support_bce=0.0,
+        support_dice=0.0,
+    )
+    result = p2b_bev_loss(
+        prediction,
+        complete,
+        visible,
+        support,
+        probability_model="bce",
+        weights=weights,
+    )
+    assert torch.allclose(
+        result["observed_gate_pixel_bce"], torch.log(torch.tensor(2.0))
+    )
+    result["loss"].backward()
+    assert leaves[0].grad is None or not bool((leaves[0].grad != 0).any())
+    assert bool((leaves[1].grad.abs() > 0).any())
+
+
+def test_hidden_curriculum_blocks_only_hidden_occupied_expert_gradient() -> None:
+    complete, visible, support = _targets()
+    masks = p2b_region_masks(complete, visible, support)
+    weights = P2BLossWeights(
+        observed_gate_pixel=0.0,
+        guessed_pixel=1.0,
+        guessed_surface=0.0,
+        wrong_evidence_kl=0.0,
+        support_bce=0.0,
+        support_dice=0.0,
+    )
+    prediction, leaves = _prediction(complete.shape[-1], "bce")
+    result = p2b_bev_loss(
+        prediction,
+        complete,
+        visible,
+        support,
+        probability_model="bce",
+        weights=weights,
+        hidden_occupied_scale=0.0,
+    )
+    result["loss"].backward()
+    gradient = leaves[0].grad[0, 0]
+    assert bool((gradient[masks.guessed_free[0]].abs() > 0).all())
+    assert bool((gradient[masks.visible_surface[0]].abs() > 0).all())
+    assert bool((gradient[masks.hidden_guessed_occupied[0]] == 0).all())
+
+    prediction, leaves = _prediction(complete.shape[-1], "bce")
+    result = p2b_bev_loss(
+        prediction,
+        complete,
+        visible,
+        support,
+        probability_model="bce",
+        weights=weights,
+        hidden_occupied_scale=1.0,
+    )
+    result["loss"].backward()
+    assert bool(
+        (leaves[0].grad[0, 0][masks.hidden_guessed_occupied[0]].abs() > 0).all()
+    )
+
+
+def test_curriculum_boundaries() -> None:
+    assert hidden_occupied_supervision_weight(0, 100) == 0.0
+    assert hidden_occupied_supervision_weight(10, 100) == 0.0
+    assert hidden_occupied_supervision_weight(17, 100) == pytest.approx(7.0 / 15.0)
+    assert hidden_occupied_supervision_weight(25, 100) == 1.0
+    assert hidden_occupied_supervision_weight(100, 100) == 1.0
+    assert wrong_evidence_kl_weight(20, 100, maximum=1.0) == 0.0
+    assert wrong_evidence_kl_weight(25, 100, maximum=1.0) == pytest.approx(0.5)
+    assert wrong_evidence_kl_weight(30, 100, maximum=1.0) == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        hidden_occupied_supervision_weight(-1, 100)
 
 
 def test_fusion_obeys_deterministic_routes() -> None:
@@ -213,9 +396,17 @@ def test_guessed_and_routing_decoders_are_independent() -> None:
         parameter.grad is not None
         for parameter in head.single_bev_decoder.guessed.parameters()
     )
+    assert any(
+        parameter.grad is not None
+        for parameter in head.guessed_token_projector.parameters()
+    )
     assert all(
         parameter.grad is None
         for parameter in head.single_bev_decoder.routing.parameters()
+    )
+    assert all(
+        parameter.grad is None
+        for parameter in head.routing_token_projector.parameters()
     )
 
 
@@ -237,6 +428,15 @@ def test_metric_finalization_uses_pixel_counts() -> None:
             "observed_gate_tp": 90,
             "observed_gate_fp": 5,
             "observed_gate_fn": 10,
+            "surface_gate_tp": 8,
+            "surface_gate_fp": 2,
+            "surface_gate_fn": 2,
+            "fused_surface_tp": 7,
+            "fused_surface_fp": 3,
+            "fused_surface_fn": 3,
+            "hidden_guessed_tp": 5,
+            "hidden_guessed_fp": 5,
+            "hidden_guessed_fn": 5,
             "guessed_tp": 6,
             "guessed_fp": 2,
             "guessed_fn": 4,
@@ -257,6 +457,10 @@ def test_metric_finalization_uses_pixel_counts() -> None:
     assert metrics["observed_gate_recall"] == 0.9
     assert metrics["observed_free_false_occupied_rate"] == 0.05
     assert metrics["guessed_pixelwise_precision"] == 0.75
+    assert metrics["visible_surface_precision"] == 0.7
+    assert metrics["visible_surface_recall"] == 0.7
+    assert metrics["hidden_occupied_precision"] == 0.5
+    assert metrics["hidden_occupied_recall"] == 0.5
 
 
 def test_observed_monitor_reads_gate_not_three_way_argmax() -> None:

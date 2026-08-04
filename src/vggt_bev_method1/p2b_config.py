@@ -135,6 +135,10 @@ def validate_p2b_config(config: dict[str, Any]) -> None:
     for name in (
         "observed_gate_pixel_weight",
         "guessed_pixel_weight",
+        "guessed_surface_weight",
+        "guessed_free_weight",
+        "guessed_visible_surface_weight",
+        "guessed_hidden_occupied_weight",
         "wrong_evidence_kl_weight",
         "support_bce_weight",
         "support_dice_weight",
@@ -144,6 +148,55 @@ def validate_p2b_config(config: dict[str, Any]) -> None:
         value = float(training.get(name, 0.0))
         if value < 0.0:
             raise ValueError(f"training.{name} cannot be negative")
+    deprecated_gate_keys = (
+        "gate_observed_free_weight",
+        "gate_visible_surface_weight",
+        "gate_hidden_weight",
+        "fused_surface_weight",
+    )
+    configured_deprecated = [
+        name for name in deprecated_gate_keys if name in training
+    ]
+    if configured_deprecated:
+        raise ValueError(
+            "surface-v2 forbids Gate-coupled loss keys: "
+            f"{configured_deprecated}; use guessed_surface_weight"
+        )
+    group_weight_sets = {
+        "guessed": (
+            "guessed_free_weight",
+            "guessed_visible_surface_weight",
+            "guessed_hidden_occupied_weight",
+        ),
+    }
+    defaults = {
+        "guessed_free_weight": 0.35,
+        "guessed_visible_surface_weight": 0.40,
+        "guessed_hidden_occupied_weight": 0.25,
+    }
+    for group, names in group_weight_sets.items():
+        if sum(float(training.get(name, defaults[name])) for name in names) <= 0.0:
+            raise ValueError(f"training.{group} group weights must have positive sum")
+    schedules = (
+        ("wrong_evidence_zero_fraction", "wrong_evidence_ramp_fraction", 0.20, 0.10),
+        (
+            "hidden_occupied_zero_fraction",
+            "hidden_occupied_ramp_fraction",
+            0.10,
+            0.15,
+        ),
+    )
+    for zero_name, ramp_name, zero_default, ramp_default in schedules:
+        zero_fraction = float(training.get(zero_name, zero_default))
+        ramp_fraction = float(training.get(ramp_name, ramp_default))
+        if not 0.0 <= zero_fraction <= 1.0:
+            raise ValueError(f"training.{zero_name} must be in [0,1]")
+        if not 0.0 <= ramp_fraction <= 1.0:
+            raise ValueError(f"training.{ramp_name} must be in [0,1]")
+        if zero_fraction + ramp_fraction > 1.0:
+            raise ValueError(
+                f"training.{zero_name} + training.{ramp_name} cannot exceed 1"
+            )
     if probability_model == "bce" and float(
         training.get("wrong_evidence_kl_weight", 0.0)
     ) != 0.0:

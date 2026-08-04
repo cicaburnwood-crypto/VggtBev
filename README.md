@@ -26,9 +26,26 @@ thresholding the Observed Gate at 0.5 and comparing it directly with the
 masked-GT observed-free region. These metrics are not inferred from final
 three-state argmax routing.
 
-No ray bank or ray-derived loss is used. The Observed-free Gate uses per-pixel
-BCE on exact masked-BEV pixels. The Guessed Expert uses dense per-pixel
-Evidential NLL or BCE over all remaining valid cells.
+No ray bank, contour, dilation, morphology, hole or continuity loss is used.
+The masked GT defines one loss-only surface set exactly as
+`visible_target == occupied`; it is not a new routing class or output head.
+Each sample is split into four disjoint supervision subsets:
+
+```text
+O  = observed free
+S  = exact visible occupied surface
+Hf = hidden guessed free
+Ho = hidden guessed occupied
+```
+
+The Observed Gate retains its original per-sample 1:1 BCE between `O` and all
+Guessed cells; surface grouping cannot change its class weights. The Guessed
+Expert NLL averages `Hf/S/Ho` with weights `.35/.40/.25`. Missing groups are
+skipped and the present weights are renormalized for that sample. An additional
+surface term supervises `-log(P_guess-occupied)` on `S` and sends gradients only
+to the Guessed Expert. Hidden occupied supervision is zero for the first 10%
+of updates, ramps during 10%-25%, then reaches full weight. Wrong-evidence KL
+uses coefficient `.005`, starts after 20%, and ramps during 20%-30%.
 
 The new training entrypoint is:
 
@@ -39,8 +56,8 @@ python -m vggt_bev_method1.cli_train_p2b --config CONFIG.toml
 Checkpoint schemas are intentionally incompatible:
 
 ```text
-P2B-NLL: p2b-three-region-evidential-v3
-P2B-BCE: p2b-three-region-bce-v3
+P2B-NLL: p2b-three-region-evidential-v5
+P2B-BCE: p2b-three-region-bce-v5
 ```
 
 Legacy P1B modules remain in the repository only for historical comparison and

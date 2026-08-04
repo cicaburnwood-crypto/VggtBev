@@ -1,5 +1,5 @@
 [data]
-root = "/home/user/Project/VGGTBEV_Method1_P2B_NLL/docker/testdata/data_build_4scenes"
+root = "/home/user/data/BEV"
 supervision = "metric_fov_complete_evidential"
 coordinate_mode = "p2b_fixed_metric"
 gt_depth_convention = "camera_axis_z_depth_m"
@@ -13,15 +13,17 @@ sample_stride = 1
 minimum_history = 1
 maximum_history = 10
 sampling_mode = "one_prefix_per_session"
-validation_fraction = 0.25
+maximum_sessions = 36000
+allow_active_writer_completed_snapshot = true
+validation_fraction = 0.05
 split_seed = 17
-split_manifest = "/home/user/Project/VGGTBEV_Method1_P2B_NLL/manifests/local_4scene_fov_complete_v6.json"
+split_manifest = "/home/user/VGGT/method1_train_p2b_nll/manifests/bev_audit_best36k_95_5_p2b_nll_single_v1.json"
 
 [model]
 pipeline_variant = "P2B-NLL"
 probability_model = "evidential"
-vggt_source = "/home/user/Project/VGGTBEV_Method1_P2B_NLL/vendor/backbone"
-checkpoint = "/home/user/Project/VGGTBEV_Method1_P2B_NLL/checkpoints/model.pt"
+vggt_source = "/home/user/VGGT/method1_train_p2b_nll/vendor/backbone"
+checkpoint = "/home/user/VGGT/method1_train_p2b_nll/checkpoints/model.pt"
 patch_size = 16
 cached_layers = [4, 11, 17, 23]
 spatial_scales = [4.0, 2.0, 1.0, 0.5]
@@ -58,22 +60,22 @@ irls_iterations = 4
 
 [teacher_cache]
 mode = "live"
-root = "/home/user/Project/VGGTBEV_Method1_P2B_NLL/cache/teacher"
+root = "/home/user/VGGT/method1_train_p2b_nll/cache/teacher_audit_best36k_surface_v4"
 
 [training]
 pipeline = "P2B-NLL"
 stage = "joint"
 enabled_bev_branches = ["single"]
 device = "cuda"
-required_cuda_devices = 1
+required_cuda_devices = 6
 distributed_backend = "nccl"
-require_same_numa = true
+require_same_numa = false
 nccl_p2p_level = "AUTO"
 nccl_timeout_seconds = 300
 ddp_bucket_cap_mb = 25
-epochs = 1
-batch_size = 1
-num_workers = 0
+epochs = 10
+batch_size = 4
+num_workers = 4
 learning_rate = 0.0001
 minimum_learning_rate = 0.00001
 weight_decay = 0.02
@@ -100,7 +102,7 @@ depth_scale_loss_weight = 0.5
 uncertainty_loss_weight = 0.05
 compile_head = false
 seed = 17
-log_every_steps = 1
-checkpoint_every_steps = 1
-validation_batches = 1
-output_dir = "/home/user/Project/VGGTBEV_Method1_P2B_NLL/runs/local_smoke"
+log_every_steps = 10
+checkpoint_every_steps = 500
+validation_batches = 100
+output_dir = "/home/user/VGGT/method1_train_p2b_nll/runs/p2b_nll_audit_best36k_gate_isolated_surface_v5_fresh"

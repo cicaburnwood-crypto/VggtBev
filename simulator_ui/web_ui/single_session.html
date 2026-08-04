@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>P2B-NLL · Standalone random session</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1119; --card:#121b27; --line:#263446; --text:#e9f1fa; --muted:#9cacbf; --blue:#75d1ff; --green:#76e491; --red:#ff7d86; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui,sans-serif; }
+    header { position:sticky; top:0; z-index:2; padding:18px 24px; background:#0d151fcc; backdrop-filter:blur(12px); border-bottom:1px solid var(--line); }
+    h1,h2,h3,p { margin:0; }
+    h1 { font-size:22px; color:var(--blue); }
+    header p { margin-top:5px; color:var(--muted); }
+    main { max-width:1500px; margin:auto; padding:20px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:18px; }
+    .status { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    .chip { padding:5px 9px; border-radius:999px; background:#1b2939; border:1px solid #30435a; color:#c8d7e8; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    figure { margin:0; overflow:hidden; border-radius:12px; background:#080c12; border:1px solid var(--line); }
+    figure img { display:block; width:100%; aspect-ratio:1; object-fit:contain; image-rendering:auto; }
+    figcaption { padding:10px 12px; color:#bed0e3; border-top:1px solid var(--line); }
+    .rgb { display:flex; gap:10px; overflow-x:auto; padding-bottom:6px; }
+    .rgb-item { min-width:220px; color:var(--muted); }
+    .rgb-item img { width:220px; height:150px; object-fit:contain; background:#080c12; border:1px solid var(--line); border-radius:8px; }
+    .metrics { columns:3 260px; column-gap:18px; margin-top:12px; }
+    .metric { break-inside:avoid; display:flex; justify-content:space-between; gap:12px; padding:5px 0; border-bottom:1px solid #1e2b3a; color:var(--muted); }
+    .metric span:last-child { color:var(--text); font-variant-numeric:tabular-nums; }
+    .error { color:var(--red); white-space:pre-wrap; }
+    @media (max-width:950px) { .grid { grid-template-columns:1fr 1fr; } }
+    @media (max-width:620px) { .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header><h1>P2B-NLL · standalone random validation session</h1><p>No ranking CSV, no previous sweep metrics, no shared ranked-session state.</p></header>
+  <main>
+    <section class="card"><div class="status"><h2>Live inference</h2><span id="status">Loading new checkpoint…</span></div><div id="chips" class="chips"></div></section>
+    <section class="card"><div id="content">Loading RGB, GT and model output from remote_gpu…</div></section>
+  </main>
+  <script>
+    const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const format = value => Number.isFinite(Number(value)) ? Number(value).toFixed(5).replace(/0+$/,'').replace(/\.$/,'') : '—';
+    async function get(path) { const response = await fetch(path,{cache:'no-store'}); const payload=await response.json(); if(!response.ok) throw new Error(payload.error||`HTTP ${response.status}`); return payload; }
+    function metricRows(metrics) { return Object.entries(metrics||{}).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`<div class="metric"><span>${escapeHtml(k.replaceAll('_',' '))}</span><span>${escapeHtml(format(v))}</span></div>`).join(''); }
+    async function load() {
+      try {
+        const health=await get('/health');
+        const p=await get('/api/session');
+        document.getElementById('status').textContent=`Ready · ${p.inference_seconds.toFixed(2)} s`;
+        document.getElementById('status').style.color='var(--green)';
+        document.getElementById('chips').innerHTML=`<span class="chip">${escapeHtml(p.session_key)}</span><span class="chip">${escapeHtml(p.scene_key)}</span><span class="chip">${escapeHtml(p.source_split)}</span><span class="chip">checkpoint step ${health.checkpoint_global_step}</span><span class="chip">${p.history_frame_count} RGB frames</span><span class="chip">HFOV ${p.camera.horizontal_fov_degrees.toFixed(1)}°</span><span class="chip">height ${p.camera.camera_height_m.toFixed(3)} m</span><span class="chip">λ ${format(p.lambda_m_per_vggt)} m/VGGT-unit</span>`;
+        const i=p.images;
+        document.getElementById('content').innerHTML=`
+          <div class="grid">
+            <figure><img src="data:image/png;base64,${i.gt_fov_complete_png_base64}"><figcaption>GT · complete occupancy inside FOV</figcaption></figure>
+            <figure><img src="data:image/png;base64,${i.model_semantic_png_base64}"><figcaption>New model · fused semantic</figcaption></figure>
+            <figure><img src="data:image/png;base64,${i.model_confidence_png_base64}"><figcaption>New model · evidential confidence</figcaption></figure>
+            <figure><img src="data:image/png;base64,${i.gt_masked_png_base64}"><figcaption>GT · masked direct observation</figcaption></figure>
+            <figure><img src="data:image/png;base64,${i.observed_gate_png_base64}"><figcaption>New model · Observed-Free Gate</figcaption></figure>
+            <figure><img src="data:image/png;base64,${i.guessed_occupancy_png_base64}"><figcaption>New model · guessed occupancy</figcaption></figure>
+          </div>
+          <h3 style="margin:20px 0 10px">RGB runtime window</h3><div class="rgb">${p.rgb_frames.map(f=>`<div class="rgb-item"><img src="data:image/jpeg;base64,${f.jpeg_base64}"><div>frame ${f.frame_id}</div></div>`).join('')}</div>
+          <h3 style="margin:20px 0 4px">Live metrics from this checkpoint</h3><div class="metrics">${metricRows(p.live_metrics)}</div>`;
+      } catch(error) { document.getElementById('status').textContent='Failed'; document.getElementById('content').className='error'; document.getElementById('content').textContent=error.message; }
+    }
+    load();
+  </script>
+</body>
+</html>

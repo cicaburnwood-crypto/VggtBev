@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive Habitat UI for the RGB-only P1B BEV head."""
+"""Interactive Habitat UI for the RGB-only P2B BEV head."""
 
 import argparse
 import base64
@@ -10,10 +10,11 @@ import queue
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 import habitat_sim
@@ -22,6 +23,7 @@ import quaternion
 from habitat_sim.utils.common import quat_from_magnum, quat_to_magnum
 from PIL import Image, ImageDraw
 
+from bev_accumulator import BEVAccumulator
 from collision_voxel import voxelize_stage_occupancy
 from model_comparison import ComparisonFrame, ModelComparisonWorker
 from point_navigation import PointNavigationError, PointNavigator
@@ -42,15 +44,73 @@ MANUAL_LINEAR_SPEED_METERS_PER_SECOND = 0.4
 MANUAL_ANGULAR_SPEED_RADIANS_PER_SECOND = 0.3
 MANUAL_MAX_INTEGRATION_STEP_SECONDS = 0.25
 DEFAULT_MANUAL_NAVMESH_CLEARANCE_METERS = 0.15
-MODEL_EXTENTS_METERS = {"p1b": 6.5}
+MODEL_EXTENTS_METERS = {"p2b": 6.5}
+MERGED_GT_EXTENT_METERS = 10.0
+MERGED_GT_SIZE = 800
+
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
+@dataclass(frozen=True)
+class SceneChoice:
+    scene_id: str
+    label: str
+    scene: Path
+    navmesh: Path
+
+
+def load_scene_catalog(path: Path) -> Tuple[SceneChoice, ...]:
+    catalog_path = path.expanduser().resolve()
+    payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    records = payload.get("scenes")
+    if not isinstance(records, list) or len(records) != 10:
+        raise ValueError("scene catalog must contain exactly 10 scenes")
+    choices = []
+    seen_ids = set()
+    seen_scenes = set()
+    for record in records:
+        scene_id = str(record["id"])
+        scene = Path(record["scene"]).expanduser()
+        navmesh = Path(record["navmesh"]).expanduser()
+        if not scene.is_absolute():
+            scene = catalog_path.parent / scene
+        if not navmesh.is_absolute():
+            navmesh = catalog_path.parent / navmesh
+        scene = scene.resolve()
+        navmesh = navmesh.resolve()
+        if scene_id in seen_ids or scene in seen_scenes:
+            raise ValueError(f"duplicate scene catalog entry: {scene_id}")
+        if not scene.is_file() or not navmesh.is_file():
+            raise FileNotFoundError(
+                f"local scene assets are incomplete for {scene_id}: "
+                f"{scene}, {navmesh}"
+            )
+        seen_ids.add(scene_id)
+        seen_scenes.add(scene)
+        choices.append(
+            SceneChoice(
+                scene_id=scene_id,
+                label=str(record.get("label", scene_id)),
+                scene=scene,
+                navmesh=navmesh,
+            )
+        )
+    return tuple(choices)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Serve the VGGNAV click-to-navigate browser interface"
+        description="Serve the P2B WASD comparison browser interface"
     )
     parser.add_argument("scene", type=Path, nargs="?", default=DEFAULT_SCENE)
     parser.add_argument("--navmesh", type=Path)
+    parser.add_argument(
+        "--scene-catalog",
+        type=Path,
+        help="local JSON catalog containing exactly ten selectable scenes",
+    )
     parser.add_argument(
         "--scene-dataset-config",
         type=Path,
@@ -113,7 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         choices=sorted(MODEL_EXTENTS_METERS),
-        default="p1b",
+        default="p2b",
         help="trained single-frame extent to compare",
     )
     parser.add_argument(
@@ -397,7 +457,7 @@ def render_fov_complete_map(
     """Keep complete simulator occupancy inside the geometric camera FOV.
 
     Unlike an observed/visibility raster, this intentionally retains cells
-    behind obstacles.  It matches P1B's FOV-complete supervision contract.
+    behind obstacles.  It matches P2B's FOV-complete supervision contract.
     """
 
     if ground_truth.ndim != 2 or ground_truth.shape[0] != ground_truth.shape[1]:
@@ -657,7 +717,8 @@ class NavigationEngine:
             sample_hz=model_hz,
             max_history=model_max_history,
         )
-        self.manual_enabled = False
+        self.merged_gt_history: list[dict[str, Any]] = []
+        self.manual_enabled = True
         self.manual_keys: Dict[str, bool] = {
             "forward": False,
             "backward": False,
@@ -680,7 +741,7 @@ class NavigationEngine:
             "step_count": 0,
             "frame_seq": 0,
             "manual_control": {
-                "enabled": False,
+                "enabled": True,
                 "keys": dict(self.manual_keys),
                 "linear_speed_mps": MANUAL_LINEAR_SPEED_METERS_PER_SECOND,
                 "angular_speed_radps": MANUAL_ANGULAR_SPEED_RADIANS_PER_SECOND,
@@ -1127,7 +1188,7 @@ class NavigationEngine:
             self.state.update(
                 {
                     "ready": True,
-                    "status": "Click a navigable point to begin",
+                    "status": "WASD active — W/S move, A/D rotate",
                     "goal": None,
                     "path": [],
                     "last_action": None,
@@ -1251,9 +1312,10 @@ class NavigationEngine:
                 ):
                     raise RuntimeError("full-scene obstacle map is unavailable")
                 gt_complete_by_model = {}
-                gt_masked_by_model = {}
+                gt_observed_by_model = {}
+                gt_guessed_by_model = {}
                 for model_key, extent_m in MODEL_EXTENTS_METERS.items():
-                    complete = render_ego_obstacle_map(
+                    complete_square = render_ego_obstacle_map(
                         simulator,
                         full_scene_map=self.full_scene_obstacle_map,
                         lower_bound=self.full_scene_lower_bound,
@@ -1263,15 +1325,26 @@ class NavigationEngine:
                         size=self.bev_size,
                         extent=extent_m,
                     )
-                    gt_complete_by_model[model_key] = complete
-                    gt_masked_by_model[model_key] = (
-                        render_fov_complete_map(
-                            complete,
-                            horizontal_fov_degrees=(
-                                self.horizontal_fov_degrees
-                            ),
-                        )
+                    complete = render_fov_complete_map(
+                        complete_square,
+                        horizontal_fov_degrees=self.horizontal_fov_degrees,
                     )
+                    observed = render_visibility_masked_map(
+                        complete_square,
+                        horizontal_fov_degrees=self.horizontal_fov_degrees,
+                    )
+                    # Both role GTs must partition the exact same FOV support
+                    # used by complete GT.  The shadowcaster and polygon
+                    # rasterizer use slightly different boundary conventions,
+                    # so clip the visibility result explicitly before taking
+                    # the reverse mask.
+                    observed[complete == 112] = 112
+                    guessed = np.full_like(complete, 112, dtype=np.uint8)
+                    guessed_domain = (complete != 112) & (observed == 112)
+                    guessed[guessed_domain] = complete[guessed_domain]
+                    gt_complete_by_model[model_key] = complete
+                    gt_observed_by_model[model_key] = observed
+                    gt_guessed_by_model[model_key] = guessed
                 selected_model_key = min(
                     MODEL_EXTENTS_METERS,
                     key=lambda key: abs(
@@ -1279,7 +1352,7 @@ class NavigationEngine:
                     ),
                 )
                 ego_obstacle_map = gt_complete_by_model[selected_model_key]
-                occlusion_map = gt_masked_by_model[selected_model_key]
+                occlusion_map = gt_observed_by_model[selected_model_key]
                 frame_extrinsic = capture_frame_extrinsic(simulator)
                 bev_png = encode_png(occlusion_map)
                 obstacle_png = encode_png(ego_obstacle_map)
@@ -1294,8 +1367,64 @@ class NavigationEngine:
                     self.condition.notify_all()
                 motion_step = int(self.state.get("step_count", 0))
                 if self.comparison.should_sample(motion_step):
+                    # Build merged masked GT from exactly the same sampled RGB
+                    # history used by the runtime. Newer frames overwrite older
+                    # labels in overlap, matching the historical collector.
+                    merged_source_complete = {}
+                    merged_source_observed = {}
+                    for model_key, extent_m in MODEL_EXTENTS_METERS.items():
+                        complete_merged_source = render_ego_obstacle_map(
+                            simulator,
+                            full_scene_map=self.full_scene_obstacle_map,
+                            lower_bound=self.full_scene_lower_bound,
+                            source_meters_per_pixel=(
+                                self.full_scene_meters_per_pixel
+                            ),
+                            size=MERGED_GT_SIZE,
+                            extent=extent_m,
+                        )
+                        observed_merged_source = render_visibility_masked_map(
+                            complete_merged_source,
+                            horizontal_fov_degrees=(
+                                self.horizontal_fov_degrees
+                            ),
+                        )
+                        merged_source_complete[model_key] = (
+                            complete_merged_source
+                        )
+                        merged_source_observed[model_key] = (
+                            observed_merged_source
+                        )
+                    self.merged_gt_history.append(
+                        {
+                            "complete": merged_source_complete,
+                            "observed": merged_source_observed,
+                            "extrinsic": frame_extrinsic,
+                        }
+                    )
+                    self.merged_gt_history = self.merged_gt_history[
+                        -self.comparison.max_history :
+                    ]
+                    gt_merged_observed_by_model = {}
+                    for model_key, extent_m in MODEL_EXTENTS_METERS.items():
+                        accumulator = BEVAccumulator(
+                            extent=extent_m,
+                            size=MERGED_GT_SIZE,
+                        )
+                        for record in self.merged_gt_history:
+                            accumulator.update(
+                                record["complete"][model_key],
+                                record["observed"][model_key],
+                                record["extrinsic"],
+                            )
+                        gt_merged_observed_by_model[model_key] = (
+                            accumulator.render_masked(
+                                frame_extrinsic,
+                                MERGED_GT_EXTENT_METERS,
+                            )
+                        )
                     # Only RGB is sent to the model. Simulator occupancy is
-                    # copied solely for the synchronized single-BEV comparison.
+                    # copied solely for synchronized visualization.
                     self.comparison.submit(
                         ComparisonFrame(
                             frame_seq=frame_sequence,
@@ -1303,9 +1432,23 @@ class NavigationEngine:
                             camera_rgb=np.asarray(
                                 observations["camera_sensor"]
                             )[..., :3].copy(),
-                            gt_masked_by_model={
+                            gt_complete_by_model={
                                 key: value.copy()
-                                for key, value in gt_masked_by_model.items()
+                                for key, value in gt_complete_by_model.items()
+                            },
+                            gt_observed_by_model={
+                                key: value.copy()
+                                for key, value in gt_observed_by_model.items()
+                            },
+                            gt_guessed_by_model={
+                                key: value.copy()
+                                for key, value in gt_guessed_by_model.items()
+                            },
+                            gt_merged_observed_by_model={
+                                key: value.copy()
+                                for key, value in (
+                                    gt_merged_observed_by_model.items()
+                                )
                             },
                         )
                     )
@@ -1325,8 +1468,15 @@ class NavigationEngine:
 
 
 def make_handler(
-    engine: NavigationEngine, html: bytes
+    engine: NavigationEngine,
+    html: bytes,
+    *,
+    scene_choices: Tuple[SceneChoice, ...] = (),
+    active_scene_id: Optional[str] = None,
+    request_scene_switch: Optional[Callable[[str], None]] = None,
 ) -> type[BaseHTTPRequestHandler]:
+    choices_by_id = {choice.scene_id: choice for choice in scene_choices}
+
     class NavigationRequestHandler(BaseHTTPRequestHandler):
         server_version = "VGGTBEVCompare/0.5"
 
@@ -1355,6 +1505,19 @@ def make_handler(
                 self._send_bytes(html, "text/html; charset=utf-8")
             elif path == "/api/state":
                 self._send_json(engine.snapshot())
+            elif path == "/api/scenes":
+                self._send_json(
+                    {
+                        "active_scene_id": active_scene_id,
+                        "scene_count": len(scene_choices),
+                        "source_split": "validation",
+                        "training_scene_overlap": 0,
+                        "scenes": [
+                            {"id": choice.scene_id, "label": choice.label}
+                            for choice in scene_choices
+                        ],
+                    }
+                )
             elif path == "/api/map.png":
                 if engine.map_png is None:
                     self._send_json(
@@ -1396,12 +1559,32 @@ def make_handler(
             elif path == "/api/model-comparison":
                 comparison = engine.latest_model_comparison()
                 models = comparison.get("models")
-                synchronized = isinstance(models, dict) and all(
-                    isinstance(models.get(model_key), dict)
-                    and "gt_png_base64" in models[model_key]
-                    and "predicted_png_base64" in models[model_key]
-                    for model_key in engine.comparison.model_extents_m
-                )
+                synchronized = isinstance(models, dict)
+                if synchronized:
+                    for model_key in engine.comparison.model_extents_m:
+                        model = models.get(model_key)
+                        if not isinstance(model, dict):
+                            synchronized = False
+                            break
+                        required = (
+                            "gt_complete_png_base64",
+                            "gt_observed_png_base64",
+                            "gt_guessed_png_base64",
+                            "predicted_png_base64",
+                        )
+                        if model.get("visualization_mode") == "legacy_masked_dual":
+                            required += (
+                                "gt_merged_observed_png_base64",
+                                "predicted_merged_png_base64",
+                            )
+                        else:
+                            required += (
+                                "observed_gate_confidence_png_base64",
+                                "guessed_occupancy_confidence_png_base64",
+                            )
+                        if not all(model.get(field) for field in required):
+                            synchronized = False
+                            break
                 if not synchronized:
                     self._send_json(
                         comparison,
@@ -1445,16 +1628,9 @@ def make_handler(
                     raise ValueError("request is too large")
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 if path == "/api/goal":
-                    x = float(payload["x"])
-                    z = float(payload["z"])
-                    if not np.isfinite(x) or not np.isfinite(z):
-                        raise ValueError("goal coordinates must be finite")
-                    engine.submit({"type": "goal", "x": x, "z": z})
+                    raise ValueError("click-to-navigate is disabled; use WASD")
                 elif path == "/api/control":
-                    action = str(payload.get("action", ""))
-                    if action not in {"pause", "resume", "cancel"}:
-                        raise ValueError("unknown control action")
-                    engine.submit({"type": action})
+                    raise ValueError("automatic navigation controls are disabled")
                 elif path == "/api/manual":
                     command: Dict[str, Any] = {"type": "manual_control"}
                     if "enabled" in payload:
@@ -1478,6 +1654,23 @@ def make_handler(
                     if len(command) == 1:
                         raise ValueError("enabled or keys is required")
                     engine.submit(command)
+                elif path == "/api/scene":
+                    if request_scene_switch is None or not scene_choices:
+                        raise ValueError("scene switching is not configured")
+                    scene_id = str(payload.get("scene_id", ""))
+                    if scene_id not in choices_by_id:
+                        raise ValueError("scene_id is not in the local 10-scene catalog")
+                    self._send_json(
+                        {
+                            "accepted": True,
+                            "scene_id": scene_id,
+                            "restarting_simulator": scene_id != active_scene_id,
+                        },
+                        HTTPStatus.ACCEPTED,
+                    )
+                    if scene_id != active_scene_id:
+                        request_scene_switch(scene_id)
+                    return
                 elif path == "/api/config":
                     extent = float(payload["bev_extent_m"])
                     if not np.isfinite(extent) or not 0.5 <= extent <= 30.0:
@@ -1541,13 +1734,13 @@ def main() -> None:
         raise SystemExit(
             f"--model {args.model} requires --bev-extent {model_extent:g}"
         )
-    scene = args.scene.expanduser().resolve()
-    if not scene.is_file():
-        raise SystemExit(f"Scene does not exist: {scene}")
-    navmesh = (
+    initial_scene = args.scene.expanduser().resolve()
+    if not initial_scene.is_file():
+        raise SystemExit(f"Scene does not exist: {initial_scene}")
+    initial_navmesh = (
         args.navmesh.expanduser().resolve()
         if args.navmesh is not None
-        else scene.with_suffix(".navmesh")
+        else initial_scene.with_suffix(".navmesh")
     )
     scene_dataset_config = (
         args.scene_dataset_config.expanduser().resolve()
@@ -1569,67 +1762,137 @@ def main() -> None:
     if not HTML_FILE.is_file():
         raise SystemExit(f"Web UI file is missing: {HTML_FILE}")
     html = HTML_FILE.read_bytes()
-
-    engine = NavigationEngine(
-        scene=scene,
-        navmesh=navmesh,
-        scene_dataset_config=scene_dataset_config,
-        gpu_device_id=args.gpu_device_id,
-        model_keys=model_keys,
-        start=None if args.random_start else tuple(args.start),
-        start_yaw_degrees=(
-            None if args.random_yaw else args.start_yaw_degrees
-        ),
-        seed=args.seed,
-        fps=args.fps,
-        action_hz=args.action_hz,
-        camera_width=args.camera_width,
-        camera_height=args.camera_height,
-        sensor_height_m=args.sensor_height_m,
-        horizontal_fov_degrees=args.horizontal_fov_degrees,
-        bev_size=args.bev_size,
-        bev_extent=model_extent,
-        obstacle_min_height=args.obstacle_min_height,
-        obstacle_max_height=args.obstacle_max_height,
-        voxel_size=args.voxel_size,
-        manual_clearance=args.manual_clearance,
-        occlusion_rays=args.occlusion_rays,
-        model_server_url=args.model_server_url,
-        model_hz=args.model_hz,
-        model_max_history=args.model_max_history,
+    if args.scene_catalog is None:
+        scene_choices = (
+            SceneChoice(
+                scene_id=f"local:{initial_scene.parent.name}",
+                label=initial_scene.parent.name,
+                scene=initial_scene,
+                navmesh=initial_navmesh,
+            ),
+        )
+        switching_enabled = False
+    else:
+        scene_choices = load_scene_catalog(args.scene_catalog)
+        switching_enabled = True
+    choices_by_id = {choice.scene_id: choice for choice in scene_choices}
+    current = next(
+        (choice for choice in scene_choices if choice.scene == initial_scene),
+        scene_choices[0],
     )
-    engine.start_engine()
-    try:
-        engine.wait_until_ready(timeout=300.0)
-        handler = make_handler(engine, html)
-        server = ThreadingHTTPServer((args.host, args.port), handler)
-        server.daemon_threads = True
-        url = f"http://{args.host}:{args.port}"
-        print(
-            f"VGGTBEV comparison UI: {url} "
-            f"(P1B single={model_extent:g}m + metric scale; merged disabled)"
+    url = f"http://{args.host}:{args.port}"
+    browser_started = False
+
+    while True:
+        engine = NavigationEngine(
+            scene=current.scene,
+            navmesh=current.navmesh,
+            scene_dataset_config=scene_dataset_config,
+            gpu_device_id=args.gpu_device_id,
+            model_keys=model_keys,
+            start=None if args.random_start else tuple(args.start),
+            start_yaw_degrees=(
+                None if args.random_yaw else args.start_yaw_degrees
+            ),
+            seed=args.seed,
+            fps=args.fps,
+            action_hz=args.action_hz,
+            camera_width=args.camera_width,
+            camera_height=args.camera_height,
+            sensor_height_m=args.sensor_height_m,
+            horizontal_fov_degrees=args.horizontal_fov_degrees,
+            bev_size=args.bev_size,
+            bev_extent=model_extent,
+            obstacle_min_height=args.obstacle_min_height,
+            obstacle_max_height=args.obstacle_max_height,
+            voxel_size=args.voxel_size,
+            manual_clearance=args.manual_clearance,
+            occlusion_rays=args.occlusion_rays,
+            model_server_url=args.model_server_url,
+            model_hz=args.model_hz,
+            model_max_history=args.model_max_history,
         )
-        snapshot = engine.snapshot()
-        session = snapshot["session"]
-        camera = snapshot["camera"]
-        print(
-            "Session: "
-            f"scene={session['scene_name']}, seed={session['seed']}, "
-            f"height={camera['sensor_height_m']:.3f}m, "
-            f"hfov={camera['hfov_degrees']:.2f}deg, "
-            f"yaw={session['start_yaw_degrees']:.2f}deg"
-        )
-        print("Click the global map to set a goal. Press Ctrl+C to stop.")
-        if not args.no_browser:
-            threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        requested_scene: list[str] = []
+        server_holder: list[ReusableThreadingHTTPServer] = []
+
+        def request_scene_switch(scene_id: str) -> None:
+            if requested_scene:
+                return
+            requested_scene.append(scene_id)
+
+            def stop_server() -> None:
+                with engine.condition:
+                    engine.state["status"] = (
+                        f"Loading local scene {choices_by_id[scene_id].label}…"
+                    )
+                    engine.condition.notify_all()
+                if server_holder:
+                    server_holder[0].shutdown()
+
+            threading.Thread(target=stop_server, daemon=True).start()
+
+        engine.start_engine()
+        server: Optional[ReusableThreadingHTTPServer] = None
+        interrupted = False
         try:
-            server.serve_forever(poll_interval=0.2)
-        except KeyboardInterrupt:
-            print("\nStopping VGGNAV…")
+            engine.wait_until_ready(timeout=300.0)
+            with engine.condition:
+                engine.state["session"].update(
+                    {
+                        "scene_catalog_id": current.scene_id,
+                        "scene_label": current.label,
+                        "source_split": "validation",
+                        "training_scene_overlap": 0,
+                    }
+                )
+            handler = make_handler(
+                engine,
+                html,
+                scene_choices=scene_choices if switching_enabled else (),
+                active_scene_id=current.scene_id,
+                request_scene_switch=(
+                    request_scene_switch if switching_enabled else None
+                ),
+            )
+            server = ReusableThreadingHTTPServer((args.host, args.port), handler)
+            server.daemon_threads = True
+            server_holder.append(server)
+            print(
+                f"VGGTBEV comparison UI: {url} "
+                f"(P2B single={model_extent:g}m + metric scale; merged disabled)"
+            )
+            snapshot = engine.snapshot()
+            session = snapshot["session"]
+            camera = snapshot["camera"]
+            print(
+                "Session: "
+                f"scene={current.scene_id}, seed={session['seed']}, "
+                f"height={camera['sensor_height_m']:.3f}m, "
+                f"hfov={camera['hfov_degrees']:.2f}deg, "
+                f"yaw={session['start_yaw_degrees']:.2f}deg"
+            )
+            if switching_enabled:
+                print(
+                    f"Local scene selector: {len(scene_choices)} validation-only scenes"
+                )
+            print("WASD control is active. Press Ctrl+C to stop.")
+            if not args.no_browser and not browser_started:
+                threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+                browser_started = True
+            try:
+                server.serve_forever(poll_interval=0.2)
+            except KeyboardInterrupt:
+                interrupted = True
+                print("\nStopping VGGNAV…")
         finally:
-            server.server_close()
-    finally:
-        engine.stop_engine()
+            if server is not None:
+                server.server_close()
+            engine.stop_engine()
+
+        if interrupted or not requested_scene:
+            break
+        current = choices_by_id[requested_scene[0]]
+        print(f"Switching to local scene: {current.scene_id}", flush=True)
 
 
 if __name__ == "__main__":
