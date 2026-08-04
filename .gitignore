@@ -19,3 +19,9 @@ artifacts/
 manifests/*.json
 docs/
 simulator_ui/
+
+# Local operational notes; never publish server or credential context.
+Agent.md
+AGENT.md
+agents.md
+AGENTS.md
