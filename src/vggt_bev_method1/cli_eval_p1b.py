@@ -1,7 +1,7 @@
-"""Distributed all-session runtime audit for a frozen P2B checkpoint.
+"""Distributed all-session runtime audit for a frozen P1B checkpoint.
 
 The model path is strictly RGB-only: every record first runs the same frozen
-VGGT aggregation and P2B head used at deployment.  GT BEV/depth is consumed
+VGGT aggregation and P1B head used at deployment.  GT BEV/depth is consumed
 only afterwards to compute and record the training objective for that window.
 """
 
@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -25,7 +25,7 @@ from vggt_bev_method1.cli_train_metric import (
     _enabled_bev_branches,
     scale_fit_config,
 )
-from vggt_bev_method1.cli_train_p2b import (
+from vggt_bev_method1.cli_train_p1b import (
     build_model,
     checkpoint_contract,
     step_losses,
@@ -38,7 +38,7 @@ from vggt_bev_method1.data import (
     method1_collate,
 )
 from vggt_bev_method1.models import metric_scale_metrics
-from vggt_bev_method1.p2b_config import load_p2b_config
+from vggt_bev_method1.p1b_config import load_p1b_config
 from vggt_bev_method1.train_utils import distributed_runtime, move_batch, seed_everything
 
 
@@ -90,7 +90,7 @@ class RankGroupedSessionBatchSampler(Sampler[list[int]]):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run RGB-only P2B runtime and record GT-evaluated loss per session"
+        description="Run RGB-only P1B runtime and record GT-evaluated loss per session"
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
@@ -137,6 +137,8 @@ def _all_session_final_prefix_dataset(config: dict) -> tuple[VGGNAVMethod1Datase
         sample_stride=int(data["sample_stride"]),
         minimum_history=int(data["minimum_history"]),
         maximum_history=int(data["maximum_history"]),
+        void_coverage_index=data.get("void_coverage_index"),
+        expected_manifest_sha256=manifest["content_sha256"],
     )
     # There are normally 1..10 prefixes per session.  Runtime audit chooses
     # the final available prefix, hence the maximum RGB context, exactly once.
@@ -230,7 +232,7 @@ def main() -> None:
     args = parse_args()
     if args.batch_size <= 0 or args.num_workers < 0 or args.log_every_sessions <= 0:
         raise ValueError("batch size/log interval must be positive and workers non-negative")
-    config = load_p2b_config(args.config)
+    config = load_p1b_config(args.config)
     training = config["training"]
     seed_everything(int(training["seed"]))
     distributed, rank, world_size, _, device, preflight = distributed_runtime(training)
@@ -337,7 +339,7 @@ def main() -> None:
                     }
                 )
                 record = {
-                    "schema": "p2b-runtime-session-loss-audit-v1",
+                    "schema": "p1b-runtime-session-loss-audit-v1",
                     "checkpoint": str(args.checkpoint.expanduser().resolve()),
                     "checkpoint_epoch": int(checkpoint_state["epoch"]),
                     "checkpoint_global_step": checkpoint_step,
@@ -367,7 +369,10 @@ def main() -> None:
                         "assigned_sessions": sampler.assigned_sessions,
                         "elapsed_seconds": elapsed,
                         "sessions_per_second": completed / max(elapsed, 1e-6),
-                        "mean_losses": {key: value / completed for key, value in sorted(summaries.items())},
+                        "mean_losses": {
+                            key: value / completed
+                            for key, value in sorted(summaries.items())
+                        },
                     },
                 )
         stream.flush()
@@ -382,7 +387,10 @@ def main() -> None:
             "elapsed_seconds": elapsed,
             "sessions_per_second": completed / max(elapsed, 1e-6),
             "complete": True,
-            "mean_losses": {key: value / max(completed, 1) for key, value in sorted(summaries.items())},
+            "mean_losses": {
+                key: value / max(completed, 1)
+                for key, value in sorted(summaries.items())
+            },
         },
     )
 
@@ -413,11 +421,14 @@ def main() -> None:
                         seen_sessions.add(key)
                         destination.write(line)
         if len(seen_sessions) != expected:
-            raise RuntimeError(f"merged audit has {len(seen_sessions)} unique sessions, expected {expected}")
+            raise RuntimeError(
+                f"merged audit has {len(seen_sessions)} unique sessions, "
+                f"expected {expected}"
+            )
         _atomic_json(
             output_dir / "summary.json",
             {
-                "schema": "p2b-runtime-session-loss-audit-v1",
+                "schema": "p1b-runtime-session-loss-audit-v1",
                 "complete": True,
                 "session_count": total,
                 "checkpoint": str(args.checkpoint.expanduser().resolve()),
@@ -434,16 +445,27 @@ def main() -> None:
                     "single_fov_support",
                     "gt_depth_for_scale_label",
                 ],
-                "window_selection": "one final prefix per manifest session; maximum usable history up to 10 RGB frames",
+                "window_selection": (
+                    "one final prefix per manifest session; maximum usable "
+                    "history up to 10 RGB frames"
+                ),
                 "mean_losses": {
                     name: float(loss_tensor[index].item()) / total
                     for index, name in enumerate(loss_names)
                 },
                 "records": "session_losses_all.jsonl",
-                "shards": [f"session_losses_rank{index:02d}.jsonl" for index in range(world_size)],
+                "shards": [
+                    f"session_losses_rank{index:02d}.jsonl"
+                    for index in range(world_size)
+                ],
             },
         )
-        print(json.dumps({"complete": True, "sessions": total, "output_dir": str(output_dir)}), flush=True)
+        print(
+            json.dumps(
+                {"complete": True, "sessions": total, "output_dir": str(output_dir)}
+            ),
+            flush=True,
+        )
     dist.barrier()
     dist.destroy_process_group()
 

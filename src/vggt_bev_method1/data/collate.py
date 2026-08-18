@@ -25,9 +25,11 @@ def method1_collate(samples: list[dict]) -> dict:
         "single_fov_complete_target",
         "single_visible_target",
         "single_fov_support_target",
+        "single_gt_valid_mask",
         "merged_fov_complete_target",
         "merged_visible_target",
         "merged_fov_support_target",
+        "merged_gt_valid_mask",
     )
     output = {
         key: torch.stack([sample[key] for sample in samples])

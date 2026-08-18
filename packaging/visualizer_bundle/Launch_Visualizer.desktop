@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=P2B 10-Scene Visualizer
-Comment=Start the fully local VGGT/P2B Habitat WASD visualizer
+Name=P1B 10-Scene Visualizer
+Comment=Start the fully local VGGT/P1B Habitat WASD visualizer
 Exec=/media/user/T9/viusalizer/start_visualizer.sh
 Terminal=true
 Icon=applications-graphics

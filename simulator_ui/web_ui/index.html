@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>P2B Interactive BEV Visualizer</title>
+  <title>P1B Interactive BEV Visualizer</title>
   <style>
     :root {
       color-scheme: dark;
@@ -95,6 +95,12 @@
       display:block; width:100%; aspect-ratio:1; object-fit:contain; image-rendering:pixelated;
       border-radius:8px; background:#0a0e13;
     }
+    .path-overlay {
+      position:absolute; left:10px; top:10px; width:calc(100% - 20px);
+      height:calc(100% - 20px); pointer-events:none; image-rendering:auto;
+    }
+    body.verifier-enabled #gtComplete { cursor:crosshair; }
+    body.verifier-enabled #gtComplete:hover { outline:2px solid var(--amber); }
     figcaption {
       min-height:50px; padding:10px 12px; display:flex; align-items:center;
       justify-content:center; text-align:center; border-top:1px solid var(--line);
@@ -110,6 +116,36 @@
       padding:12px 15px; color:var(--muted); border-top:1px solid var(--line); font-size:12px;
     }
     .legend { margin-top:6px; color:#bdc8d3; }
+    .verifier-panel {
+      display:none; margin-top:11px; padding:11px 12px; border:1px solid #37506b;
+      border-radius:10px; background:#0a121c;
+    }
+    body.verifier-enabled .verifier-panel { display:grid; gap:8px; }
+    .verifier-line { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+    .verifier-result { color:var(--muted); }
+    .verifier-result.success { color:var(--green); }
+    .verifier-result.failure { color:var(--red); }
+    .verifier-mode-label { color:#d4e3f0; font-weight:650; }
+    #verifierMode {
+      min-width:310px; padding:7px 10px; border:1px solid #455a70;
+      border-radius:7px; color:var(--text); background:#101b27;
+    }
+    .inflation-control { display:grid; grid-template-columns:auto minmax(180px,1fr) auto; }
+    #inflationRadius { width:100%; min-width:180px; accent-color:var(--cyan); cursor:pointer; }
+    #inflationValue {
+      min-width:62px; padding:4px 8px; text-align:center; color:var(--cyan);
+      border:1px solid #455a70; border-radius:7px; background:#101b27;
+      font-variant-numeric:tabular-nums; font-weight:750;
+    }
+    button {
+      padding:7px 11px; border:1px solid #455a70; border-radius:7px;
+      color:var(--text); background:#182432; cursor:pointer;
+    }
+    button:hover { border-color:var(--cyan); }
+    .contract-pill {
+      padding:3px 7px; border-radius:999px; color:#d4e3f0;
+      border:1px solid #34485c; background:#101b27; font-size:11px;
+    }
     @media (max-width:1250px) {
       main { grid-template-columns:1fr; grid-template-areas:"control" "comparison"; }
       .control-card { display:grid; grid-template-columns:minmax(300px,.8fr) minmax(320px,1.2fr); }
@@ -127,8 +163,8 @@
 <body>
   <header>
     <div class="brand"><div class="logo">V</div><div>
-      <h1>P2B Interactive BEV Visualizer</h1>
-      <div id="checkpointSubtitle" class="subtitle">Local Habitat · latest P2B-NLL · RGB-only runtime</div>
+      <h1 id="pageTitle">P1B Interactive BEV Visualizer</h1>
+      <div id="checkpointSubtitle" class="subtitle">Local Habitat · latest P1B-NLL · RGB-only runtime</div>
     </div></div>
     <div class="connection"><span id="connectionDot" class="dot"></span><span id="connectionText">Connecting</span></div>
   </header>
@@ -136,14 +172,14 @@
   <main>
     <section class="card control-card">
       <div class="card-head"><span class="card-title">Live RGB + WASD</span><span id="cameraMetadata" class="tag">Waiting for camera</span></div>
-      <div class="scene-picker">
+      <div id="scenePicker" class="scene-picker">
         <label for="sceneSelect">Scene</label>
         <select id="sceneSelect" disabled><option>Loading scenes…</option></select>
       </div>
       <div class="camera-wrap"><img id="cameraStream" src="/stream/camera.mjpg" alt="Live simulator RGB camera"></div>
       <div class="status-grid">
         <div class="metric"><div class="metric-label">WASD status</div><div id="navigationStatus" class="metric-value">Starting…</div></div>
-        <div class="metric"><div class="metric-label">Position X, Z</div><div id="position" class="metric-value">—</div></div>
+        <div class="metric"><div id="positionLabel" class="metric-label">Position X, Z</div><div id="position" class="metric-value">—</div></div>
         <div class="metric"><div class="metric-label">Action / steps</div><div id="action" class="metric-value">—</div></div>
         <div class="metric"><div class="metric-label">Scene</div><div id="sessionMetadata" class="metric-value">—</div></div>
       </div>
@@ -151,31 +187,63 @@
     </section>
 
     <section class="card comparison-card">
-      <div class="card-head"><span class="card-title">Simulator GT ↔ P2B</span><span id="comparisonStatus" class="tag">Waiting for model runtime</span></div>
+      <div class="card-head"><span class="card-title">Simulator GT ↔ P1B</span><span id="comparisonStatus" class="tag">Waiting for model runtime</span></div>
       <div class="comparison-scroll"><div class="comparison-grid">
-        <figure class="gt"><div class="bev-pane"><img id="gtComplete" class="bev-image"><span class="pane-label">complete inside FOV</span></div><figcaption>Complete GT</figcaption></figure>
-        <figure class="gt"><div class="bev-pane"><img id="gtObserved" class="bev-image"><span class="pane-label">masked / directly observed</span></div><figcaption>Observed GT</figcaption></figure>
-        <figure class="gt"><div class="bev-pane"><img id="gtGuessed" class="bev-image"><span class="pane-label">occluded / guessed domain</span></div><figcaption>Guessed GT</figcaption></figure>
-        <figure class="prediction"><div class="bev-pane"><img id="predSemantic" class="bev-image"><span class="pane-label">red line = Gate</span></div><figcaption>P2B semantic</figcaption></figure>
-        <figure class="prediction"><div class="bev-pane"><img id="predObserved" class="bev-image"><span class="pane-label">red line = Gate</span></div><figcaption>Observed Gate confidence</figcaption></figure>
-        <figure class="prediction"><div class="bev-pane"><img id="predGuessed" class="bev-image"><span class="pane-label">red line = Gate</span></div><figcaption>Guessed occupancy confidence</figcaption></figure>
+        <figure class="gt"><div class="bev-pane"><img id="gtComplete" class="bev-image"><canvas class="path-overlay" data-space="gt"></canvas><span class="pane-label">click inside initial camera FOV · labels ignored</span></div><figcaption>Complete GT (display only)</figcaption></figure>
+        <figure class="gt"><div class="bev-pane"><img id="gtObserved" class="bev-image"><canvas class="path-overlay" data-space="gt"></canvas><span class="pane-label">masked / directly observed</span></div><figcaption>Observed GT</figcaption></figure>
+        <figure class="gt"><div class="bev-pane"><img id="gtGuessed" class="bev-image"><canvas class="path-overlay" data-space="gt"></canvas><span class="pane-label">occluded / guessed domain</span></div><figcaption>Guessed GT</figcaption></figure>
+        <figure class="prediction"><div class="bev-pane"><img id="predSemantic" class="bev-image"><canvas class="path-overlay" data-space="predicted"></canvas><span class="pane-label">A* planning raster</span></div><figcaption>P1B semantic</figcaption></figure>
+        <figure class="prediction"><div class="bev-pane"><img id="predObserved" class="bev-image"><canvas class="path-overlay" data-space="predicted"></canvas><span class="pane-label">red line = Gate</span></div><figcaption>Observed Gate confidence</figcaption></figure>
+        <figure class="prediction"><div class="bev-pane"><img id="predGuessed" class="bev-image"><canvas class="path-overlay" data-space="predicted"></canvas><span class="pane-label">red line = Gate</span></div><figcaption>Guessed occupancy confidence</figcaption></figure>
       </div></div>
       <div class="comparison-note">
         <div id="modelMetadata" class="legend">Occupied 0 · unknown 112 · free 255</div>
+        <div class="verifier-panel">
+          <div><strong>Interactive verifier:</strong> Complete GT is only a convenient click background. The browser converts the click to current ego-local (right, forward) metres; the backend receives no GT pixel/value. Only the initial target is checked against calibrated camera FOV; A* runs only on Predicted BEV.</div>
+          <div class="verifier-line">
+            <label class="verifier-mode-label" for="verifierMode">Planning mode</label>
+            <select id="verifierMode">
+              <option value="open_loop">Open loop — run A* once</option>
+              <option value="closed_loop">Closed loop — replan when possible, otherwise keep route</option>
+            </select>
+          </div>
+          <div class="verifier-line inflation-control">
+            <label class="verifier-mode-label" for="inflationRadius">One-sided obstacle inflation</label>
+            <input id="inflationRadius" type="range" min="0" max="50" step="0.5" value="2.5">
+            <output id="inflationValue" for="inflationRadius">2.5 cm</output>
+          </div>
+          <div class="verifier-line"><span class="contract-pill">GT: display-only background</span><span class="contract-pill">A*: predicted BEV + local target only</span><span class="contract-pill">no simulator pose / extrinsic / navmesh</span><span class="contract-pill">open loop: fixed local actions</span><span class="contract-pill">closed loop: VGGT pose + Scale Token</span><span id="inflationContract" class="contract-pill">one-sided inflation 2.5 cm</span><span class="contract-pill">unknown is blocked</span></div>
+          <div id="verifierResult" class="verifier-result">Waiting for a synchronized frame; then click the display-only GT canvas.</div>
+          <div class="verifier-line"><button id="clearPlan" type="button">Clear path / resume live</button><button id="cancelRobot" type="button">Cancel robot + resume WASD</button></div>
+        </div>
       </div>
     </section>
   </main>
 
   <script>
     let state=null, activeScenePath=null, pendingSceneId=null;
+    let latestComparison=null, activePlan=null, frozenPlan=false, verifierEnabled=false;
+    let lastPlanRevision=0,planDisplayEnabled=true,inflationInitialized=false;
     const manualKeys=new Set();
     let manualPostChain=Promise.resolve();
 
     async function post(path,payload) {
       const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-      if(!response.ok){const detail=await response.json().catch(()=>({}));throw new Error(detail.error||`Request failed: ${response.status}`);}
+      if(!response.ok){const detail=await response.json().catch(()=>({}));const error=new Error(detail.failure_reason||detail.error||`Request failed: ${response.status}`);error.detail=detail;throw error;}
       return response.json();
     }
+    function selectedInflationRadiusM(){
+      const centimeters=Number(document.getElementById('inflationRadius').value);
+      return Number.isFinite(centimeters)?centimeters/100:0.025;
+    }
+    function updateInflationDisplay(){
+      const centimeters=Number(document.getElementById('inflationRadius').value);
+      const label=`${centimeters.toFixed(1)} cm`;
+      document.getElementById('inflationValue').textContent=label;
+      document.getElementById('inflationContract').textContent=`one-sided inflation ${label}`;
+    }
+    document.getElementById('inflationRadius').addEventListener('input',updateInflationDisplay);
+    updateInflationDisplay();
     function manualKeyPayload(){return{forward:manualKeys.has('w'),backward:manualKeys.has('s'),left:manualKeys.has('a'),right:manualKeys.has('d')};}
     function queueManualPost(payload){manualPostChain=manualPostChain.catch(()=>undefined).then(()=>post('/api/manual',payload));return manualPostChain;}
     function releaseManualKeys(){if(!manualKeys.size)return;manualKeys.clear();queueManualPost({keys:manualKeyPayload()});}
@@ -196,6 +264,7 @@
       const response=await fetch('/api/scenes',{cache:'no-store'}); const payload=await response.json();
       if(!response.ok)throw new Error(payload.error||'Scene catalog unavailable');
       const select=document.getElementById('sceneSelect');
+      if(!payload.scenes.length){select.innerHTML='<option>Current local scene (fixed)</option>';select.disabled=true;return;}
       select.innerHTML=payload.scenes.map(scene=>`<option value="${scene.id}">${scene.label}</option>`).join('');
       select.value=payload.active_scene_id; select.disabled=payload.scenes.length!==10;
     }
@@ -209,19 +278,47 @@
       try{
         const response=await fetch('/api/state',{cache:'no-store'}); state=await response.json();
         const connected=response.ok&&state.ready;
+        verifierEnabled=Boolean(state.verifier&&state.verifier.enabled);
+        document.body.classList.toggle('verifier-enabled',verifierEnabled);
+        document.getElementById('pageTitle').textContent=verifierEnabled?'P1B Interactive A* Verifier':'P1B Interactive BEV Visualizer';
         document.getElementById('connectionDot').classList.toggle('online',connected);
         document.getElementById('connectionText').textContent=connected?'Simulator connected':'Connecting';
         document.getElementById('navigationStatus').textContent=state.status||'—';
+        const runtimeTarget=((state.verifier||{}).active_plan||{}).target_metric_m;
         const position=state.agent_position;
-        document.getElementById('position').textContent=position?`${position[0].toFixed(2)}, ${position[2].toFixed(2)}`:'—';
+        document.getElementById('positionLabel').textContent=verifierEnabled?'Local target X, forward':'Position X, Z';
+        document.getElementById('position').textContent=verifierEnabled
+          ?(runtimeTarget?`${Number(runtimeTarget[0]).toFixed(2)}, ${Number(runtimeTarget[1]).toFixed(2)} m`:'—')
+          :(position?`${position[0].toFixed(2)}, ${position[2].toFixed(2)}`:'—');
         document.getElementById('action').textContent=`${state.last_action||'idle'} · ${state.step_count||0}`;
         const session=state.session,camera=state.camera;
         document.getElementById('cameraMetadata').textContent=camera?`${camera.width}×${camera.height} · ${camera.hfov_degrees.toFixed(1)}° · ${camera.sensor_height_m.toFixed(2)} m`:'Waiting';
-        document.getElementById('sessionMetadata').textContent=session?`${session.scene_label||session.scene_name} · yaw ${session.start_yaw_degrees.toFixed(1)}°`:'—';
+        document.getElementById('sessionMetadata').textContent=session
+          ?(verifierEnabled?`${session.scene_label||session.scene_name}`:`${session.scene_label||session.scene_name} · yaw ${session.start_yaw_degrees.toFixed(1)}°`)
+          :'—';
         if(session&&session.scene!==activeScenePath){activeScenePath=session.scene;document.getElementById('cameraStream').src=`/stream/camera.mjpg?v=${Date.now()}`;}
         if(session&&session.scene_catalog_id){
           const select=document.getElementById('sceneSelect');select.value=session.scene_catalog_id;
           if(!pendingSceneId||pendingSceneId===session.scene_catalog_id){pendingSceneId=null;select.disabled=false;}
+        }
+        const verifier=state.verifier||{},remotePlan=verifier.active_plan;
+        if(verifierEnabled&&!inflationInitialized){
+          const slider=document.getElementById('inflationRadius');
+          const minimum=Number(verifier.inflation_radius_min_m);
+          const maximum=Number(verifier.inflation_radius_max_m);
+          const current=Number(verifier.inflation_radius_m);
+          if(Number.isFinite(minimum))slider.min=String(minimum*100);
+          if(Number.isFinite(maximum))slider.max=String(maximum*100);
+          if(Number.isFinite(current))slider.value=String(current*100);
+          inflationInitialized=true;updateInflationDisplay();
+        }
+        const revision=Number(verifier.plan_revision||0);
+        if(planDisplayEnabled&&remotePlan&&revision>lastPlanRevision){
+          lastPlanRevision=revision;activePlan=remotePlan;
+          frozenPlan=activePlan.mode==='open_loop';
+          updateVerifierResult(activePlan);
+          const synchronized=latestComparison&&Number(latestComparison.last_frame_seq)===Number(activePlan.frame_seq);
+          if(activePlan.mode==='open_loop'||synchronized)drawPlan();else clearOverlays();
         }
       }catch(error){document.getElementById('connectionDot').classList.remove('online');document.getElementById('connectionText').textContent='Reconnecting';}
     }
@@ -231,22 +328,148 @@
       try{
         const response=await fetch('/api/model-comparison',{cache:'no-store'});const payload=await response.json();
         if(!response.ok){status.textContent=payload.status||'Waiting for inference';return;}
-        const model=(payload.models||{}).p2b||{};
+        latestComparison=payload;
+        const model=(payload.models||{}).p1b||{};
         const images={
           gtComplete:model.gt_complete_png_base64,
           gtObserved:model.gt_observed_png_base64,
           gtGuessed:model.gt_guessed_png_base64,
-          predSemantic:model.predicted_png_base64,
+          predSemantic:model.planning_semantic_png_base64||model.predicted_png_base64,
           predObserved:model.observed_gate_confidence_png_base64,
           predGuessed:model.guessed_occupancy_confidence_png_base64
         };
-        for(const[id,encoded]of Object.entries(images)){if(encoded)document.getElementById(id).src=`data:image/png;base64,${encoded}`;}
+        if(!frozenPlan){
+          setPanelImages(images);
+          if(activePlan&&activePlan.mode==='closed_loop'){
+            if(Number(payload.last_frame_seq)===Number(activePlan.frame_seq))drawPlan();else clearOverlays();
+          }
+        }
         const seconds=Number(payload.inference_seconds);
         status.textContent=`frame ${payload.last_frame_seq} · history ${payload.history_frame_count}/${payload.max_history}`+(Number.isFinite(seconds)?` · ${seconds.toFixed(2)} s`:'');
-        document.getElementById('checkpointSubtitle').textContent=`Local Habitat · P2B-NLL epoch ${model.checkpoint_epoch}, step ${model.checkpoint_global_step} · RGB-only runtime`;
-        document.getElementById('modelMetadata').textContent=`λ ${Number(model.depth_scale).toFixed(3)} ± ${Number(model.scale_std_m_per_vggt).toFixed(3)} m/VGGT-unit · native ${model.single_output_size}² · occupied 0 · unknown 112 · free 255`;
+        document.getElementById('checkpointSubtitle').textContent=`Local Habitat · P1B-NLL epoch ${model.checkpoint_epoch}, step ${model.checkpoint_global_step} · RGB-only runtime`;
+        const poseText=model.vggt_pose_available?` · VGGT poses ${model.vggt_pose_frame_count}`:' · VGGT pose unavailable';
+        document.getElementById('modelMetadata').textContent=`λ ${Number(model.depth_scale).toFixed(3)} ± ${Number(model.scale_std_m_per_vggt).toFixed(3)} m/VGGT-unit · native ${model.single_output_size}²${poseText} · occupied 0 · unknown 112 · free 255`;
       }catch(error){status.textContent='Model comparison reconnecting';}
     }
+
+    function setPanelImages(images){
+      for(const[id,encoded]of Object.entries(images)){if(encoded)document.getElementById(id).src=`data:image/png;base64,${encoded}`;}
+    }
+
+    function modelImages(model){
+      return{
+        gtComplete:model.gt_complete_png_base64,
+        gtObserved:model.gt_observed_png_base64,
+        gtGuessed:model.gt_guessed_png_base64,
+        predSemantic:model.planning_semantic_png_base64||model.predicted_png_base64,
+        predObserved:model.observed_gate_confidence_png_base64,
+        predGuessed:model.guessed_occupancy_confidence_png_base64
+      };
+    }
+
+    function drawPlan(){
+      document.querySelectorAll('.path-overlay').forEach(canvas=>{
+        const size=512; canvas.width=size; canvas.height=size;
+        const context=canvas.getContext('2d'); context.clearRect(0,0,size,size);
+        if(!activePlan)return;
+        const alignment=activePlan.metric_alignment||{};
+        const extent=Number(alignment.predicted_extent_m);
+        if(!Number.isFinite(extent)||extent<=0)return;
+        const points=activePlan.path_metric_m||[];
+        const toPixel=point=>[(point[0]/extent+.5)*size,(.5-point[1]/extent)*size];
+        if(points.length){
+          context.beginPath();
+          points.forEach((point,index)=>{const pixel=toPixel(point);if(index===0)context.moveTo(pixel[0],pixel[1]);else context.lineTo(pixel[0],pixel[1]);});
+          context.lineWidth=4; context.strokeStyle='#ffc24c'; context.lineJoin='round'; context.lineCap='round';
+          context.shadowColor='rgba(0,0,0,.8)';context.shadowBlur=3;context.stroke();context.shadowBlur=0;
+          const start=toPixel(points[0]);context.beginPath();context.arc(start[0],start[1],6,0,Math.PI*2);context.fillStyle='#48cfff';context.fill();
+        }
+        const target=activePlan.target_metric_m;
+        if(target){
+          const pixel=toPixel(target);context.beginPath();context.arc(pixel[0],pixel[1],9,0,Math.PI*2);context.lineWidth=4;context.strokeStyle=activePlan.success?'#34e98a':'#ff5968';context.stroke();
+          context.beginPath();context.moveTo(pixel[0]-6,pixel[1]);context.lineTo(pixel[0]+6,pixel[1]);context.moveTo(pixel[0],pixel[1]-6);context.lineTo(pixel[0],pixel[1]+6);context.stroke();
+        }
+      });
+    }
+
+    function clearOverlays(){
+      document.querySelectorAll('.path-overlay').forEach(canvas=>{
+        canvas.width=512;canvas.height=512;
+        canvas.getContext('2d').clearRect(0,0,512,512);
+      });
+    }
+
+    function updateVerifierResult(plan){
+      const element=document.getElementById('verifierResult');
+      const mode=plan.mode==='closed_loop'?'Closed loop':'Open loop';
+      const replans=Number(plan.replan_count||0);
+      const deferredReplans=Number(plan.deferred_replan_count||0);
+      if(plan.execution_status==='failed'){
+        const code=plan.execution_failure_code?` [${plan.execution_failure_code}]`:'';
+        element.className='verifier-result failure';
+        element.textContent=`${mode} failed${code}: ${plan.execution_failure_reason||'execution stopped'}`;
+        return;
+      }
+      const status=plan.execution_status==='reached_predicted'
+        ?'goal reached (VGGT/Scale estimate)'
+        :(plan.execution_status==='completed_unverified'
+          ?'action queue complete (outcome unverified)'
+          :(plan.execution_status||'planned'));
+      const actions=Number.isFinite(Number(plan.execution_action_count))?` · fixed actions ${Number(plan.executed_action_count||0)}/${Number(plan.execution_action_count)}`:'';
+      const predictedError=Number.isFinite(Number(plan.predicted_target_error_m))?` · predicted target error ${Number(plan.predicted_target_error_m).toFixed(3)} m`:'';
+      element.className='verifier-result success';
+      const requestedInflation=Number(plan.inflation_radius_m);
+      const effectiveInflation=Number(plan.effective_inflation_radius_m);
+      const inflation=Number.isFinite(requestedInflation)
+        ?` · inflation ${(requestedInflation*100).toFixed(1)} cm`+
+          (Number.isFinite(effectiveInflation)&&Math.abs(effectiveInflation-requestedInflation)>1e-6?` (raster ${(effectiveInflation*100).toFixed(1)} cm)`:'')
+        :'';
+      const deferred=deferredReplans?` · deferred ${deferredReplans} (kept prior route)`:'';
+      element.textContent=`${mode} · ${status} · A* ${Number(plan.path_length_m).toFixed(2)} m · ${plan.path_cell_count} cells${inflation}${actions}${predictedError} · replans ${replans}${deferred} · λ ${Number((plan.metric_alignment||{}).lambda_m_per_vggt).toFixed(3)} m/unit`;
+    }
+
+    function clearPlan(resumeLive=true){
+      activePlan=null;frozenPlan=false;planDisplayEnabled=false;
+      lastPlanRevision=Math.max(lastPlanRevision,Number(((state||{}).verifier||{}).plan_revision||0));
+      clearOverlays();
+      document.getElementById('verifierResult').className='verifier-result';
+      document.getElementById('verifierResult').textContent='Click a target coordinate on the display-only GT canvas.';
+      if(resumeLive)pollComparison();
+    }
+
+    document.getElementById('clearPlan').addEventListener('click',()=>clearPlan(true));
+    document.getElementById('cancelRobot').addEventListener('click',async()=>{
+      clearPlan(true);manualKeys.clear();
+      try{await post('/api/manual',{enabled:true,keys:manualKeyPayload()});}catch(error){console.error(error);}
+    });
+
+    document.getElementById('gtComplete').addEventListener('click',async event=>{
+      if(!verifierEnabled)return;
+      const resultElement=document.getElementById('verifierResult');
+      if(frozenPlan){resultElement.className='verifier-result failure';resultElement.textContent='Clear the frozen plan before selecting another target.';return;}
+      const payload=latestComparison,model=((payload||{}).models||{}).p1b;
+      if(!payload||!model){resultElement.className='verifier-result failure';resultElement.textContent='No synchronized prediction is ready.';return;}
+      const rectangle=event.currentTarget.getBoundingClientRect();
+      const clickU=(event.clientX-rectangle.left)/rectangle.width;
+      const clickV=(event.clientY-rectangle.top)/rectangle.height;
+      const extent=Number(model.extent_m);
+      const mode=document.getElementById('verifierMode').value;
+      const inflationRadiusM=selectedInflationRadiusM();
+      const targetMetric=[(clickU-.5)*extent,(.5-clickV)*extent];
+      planDisplayEnabled=true;
+      activePlan={success:false,mode,inflation_radius_m:inflationRadiusM,target_metric_m:targetMetric,path_metric_m:[],metric_alignment:{predicted_extent_m:extent}};
+      drawPlan();resultElement.className='verifier-result';resultElement.textContent='Running A* on the synchronized predicted BEV…';
+      try{
+        const plan=await post('/api/verifier/plan',{model_key:'p1b',mode,frame_seq:payload.last_frame_seq,target_metric_m:targetMetric,inflation_radius_m:inflationRadiusM});
+        activePlan=plan;frozenPlan=mode==='open_loop';
+        if(frozenPlan)setPanelImages(modelImages(plan.images||model));
+        drawPlan();updateVerifierResult(plan);
+      }catch(error){
+        activePlan.success=false;drawPlan();resultElement.className='verifier-result failure';
+        const code=error.detail&&error.detail.failure_code?` [${error.detail.failure_code}]`:'';
+        resultElement.textContent=`Planning failed${code}: ${error.message}`;
+      }
+    });
 
     setInterval(pollState,120); setInterval(pollComparison,500);
     pollState(); pollComparison();

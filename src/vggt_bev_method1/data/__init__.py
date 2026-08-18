@@ -14,16 +14,16 @@ from .manifest import (
     load_split_manifest,
     manifest_session_keys,
 )
-from .preprocess import RGBResizePad
-from .p2b_targets import (
-    P2BRegionMasks,
+from .p1b_targets import (
     ROUTING_CLASS_COUNT,
     ROUTING_CLASS_NAMES,
     ROUTING_GUESSED_FREE,
     ROUTING_GUESSED_OCCUPIED,
     ROUTING_OBSERVED_FREE,
-    p2b_region_masks,
+    P1BRegionMasks,
+    p1b_region_masks,
 )
+from .preprocess import RGBResizePad
 
 __all__ = [
     "RGBResizePad",
@@ -37,11 +37,11 @@ __all__ = [
     "method1_collate",
     "local_fov_polygon",
     "split_sessions_by_scene",
-    "P2BRegionMasks",
+    "P1BRegionMasks",
     "ROUTING_CLASS_COUNT",
     "ROUTING_CLASS_NAMES",
     "ROUTING_GUESSED_FREE",
     "ROUTING_GUESSED_OCCUPIED",
     "ROUTING_OBSERVED_FREE",
-    "p2b_region_masks",
+    "p1b_region_masks",
 ]

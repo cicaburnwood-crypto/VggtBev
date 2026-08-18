@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lazy, SSH-tunnelled browser for the ranked 60K P2B session sweep.
+"""Lazy, SSH-tunnelled browser for the ranked 60K P1B session sweep.
 
 Only the sweep CSV is indexed at startup. RGB frames and BEV targets are read
 from the remote dataset, and RGB-only model inference is run, only after the
@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from p2b_runtime_server import build_system, render_confidence, render_semantic
+from p1b_runtime_server_two_expert import build_system, render_confidence, render_semantic
 
 from vggt_bev_method1.config import LabelValues
 from vggt_bev_method1.data.fov_targets import (
@@ -37,9 +37,9 @@ from vggt_bev_method1.data.fov_targets import (
     fov_union_mask,
 )
 from vggt_bev_method1.data.preprocess import RGBResizePad
-from vggt_bev_method1.p2b_metrics import (
-    finalize_p2b_metrics,
-    p2b_metric_totals,
+from vggt_bev_method1.p1b_metrics import (
+    finalize_p1b_metrics,
+    p1b_metric_totals,
 )
 
 
@@ -47,18 +47,18 @@ ROOT = Path(__file__).resolve().parent
 HTML_FILE = ROOT / "web_ui/ranked_sessions.html"
 DEFAULT_DATA_ROOT = Path("/home/user/data/BEV")
 DEFAULT_SWEEP = Path(
-    "/home/user/VGGT/method1_train_p2b_nll/"
+    "/home/user/VGGT/method1_train_p1b_nll/"
     "audits/p2b_nll_epoch8_all60k_session_sweep.csv"
 )
 DEFAULT_SUMMARY = Path(
-    "/home/user/VGGT/method1_train_p2b_nll/"
+    "/home/user/VGGT/method1_train_p1b_nll/"
     "runs/p2b_nll_epoch8_runtime_audit_all60k_20260802_1740/summary.json"
 )
 DEFAULT_BACKBONE_SOURCE = Path(
-    "/home/user/VGGT/method1_train_p2b_nll/vendor/backbone"
+    "/home/user/VGGT/method1_train_p1b_nll/vendor/backbone"
 )
 DEFAULT_BACKBONE_CHECKPOINT = Path(
-    "/home/user/VGGT/method1_train_p2b_nll/checkpoints/model.pt"
+    "/home/user/VGGT/method1_train_p1b_nll/checkpoints/model.pt"
 )
 DEFAULT_SORT = "guessed_selection_score"
 IDENTITY_COLUMNS = {
@@ -503,13 +503,13 @@ class LazySessionRuntime:
             torch.cuda.synchronize(self.device)
         inference_seconds = time.monotonic() - started
         branch = prediction["single_bev"]
-        metric_totals = p2b_metric_totals(
+        metric_totals = p1b_metric_totals(
             branch,
             complete.to(self.device),
             visible.to(self.device),
             support.to(self.device),
         )
-        live_metrics = finalize_p2b_metrics(
+        live_metrics = finalize_p1b_metrics(
             {name: float(value.detach().cpu()) for name, value in metric_totals.items()}
         )
         return {
@@ -604,7 +604,7 @@ def make_handler(
     html: bytes,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "P2BRankedSessions/1.0"
+        server_version = "P1BRankedSessions/1.0"
 
         def _send_json(
             self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK

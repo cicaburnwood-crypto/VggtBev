@@ -11,6 +11,8 @@ ProbabilityModel = Literal["evidential", "bce"]
 def decode_binary_prediction(
     raw: torch.Tensor,
     probability_model: ProbabilityModel,
+    *,
+    include_diagnostics: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Decode one expert without pretending BCE logits are evidence."""
 
@@ -23,28 +25,39 @@ def decode_binary_prediction(
         strength = alpha + beta
         probability = alpha / strength
         variance = alpha * beta / (strength.square() * (strength + 1.0))
-        return {
+        output = {
             "raw": raw,
             "alpha_occupied": alpha,
             "beta_free": beta,
-            "evidence_strength": strength,
             "occupancy_probability": probability,
+        }
+        if not include_diagnostics:
+            return output
+        output.update(
+            {
+            "evidence_strength": strength,
             "occupancy_distribution_variance": variance,
             "epistemic_uncertainty": 2.0 / strength,
             "evidence_confidence": (1.0 - 2.0 / strength).clamp(0.0, 1.0),
             "classification_confidence": (2.0 * probability - 1.0).abs(),
-        }
+            }
+        )
+        return output
     if probability_model == "bce":
         if raw.shape[1] != 1:
             raise ValueError("BCE experts require one output channel")
         logit = raw[:, 0].float()
         probability = torch.sigmoid(logit)
-        return {
+        output = {
             "raw": raw,
             "occupancy_logit": logit,
             "occupancy_probability": probability,
-            "classification_confidence": (2.0 * probability - 1.0).abs(),
         }
+        if include_diagnostics:
+            output["classification_confidence"] = (
+                2.0 * probability - 1.0
+            ).abs()
+        return output
     raise ValueError(f"unsupported probability model: {probability_model}")
 
 

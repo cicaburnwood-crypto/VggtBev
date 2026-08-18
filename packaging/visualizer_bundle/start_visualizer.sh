@@ -29,7 +29,7 @@ model_port="${MODEL_PORT:-8896}"
 gpu_index="${GPU_INDEX:-0}"
 model_python="$bundle_root/runtime/ml-gpu/bin/python"
 habitat_python="$bundle_root/runtime/habitat-sim/bin/python"
-runtime_checkpoint="$bundle_root/checkpoints/p2b_nll_v5_step14320.pt"
+runtime_checkpoint="$bundle_root/checkpoints/p1b_stage1_36k_surface_nll_epoch10_step14320.pt"
 backbone_checkpoint="$bundle_root/checkpoints/vggt_omega_1b_512_model.pt"
 initial_scene="$bundle_root/scenes/00484-fc7RfUCN5mY/fc7RfUCN5mY.basis.glb"
 scene_catalog="$bundle_root/scenes_10.json"
@@ -120,7 +120,7 @@ export CUDA_CACHE_PATH="$bundle_cache_dir/cuda"
 export MPLCONFIGDIR="$bundle_cache_dir/matplotlib"
 export TMPDIR="$bundle_tmp_dir"
 
-"$model_python" "$bundle_root/app/simulator_ui/p2b_runtime_server.py" \
+"$model_python" "$bundle_root/app/simulator_ui/p1b_runtime_server_two_expert.py" \
   --checkpoint "$runtime_checkpoint" \
   --backbone-source "$bundle_root/app/vendor/backbone" \
   --backbone-checkpoint "$backbone_checkpoint" \
@@ -131,7 +131,7 @@ export TMPDIR="$bundle_tmp_dir"
   > "$log_dir/model_runtime.log" 2>&1 &
 model_pid=$!
 
-echo "Loading local VGGT/P2B runtime on GPU $gpu_index…"
+echo "Loading local VGGT/P1B runtime on GPU $gpu_index…"
 model_ready=0
 for _ in $(seq 1 90); do
   if ! kill -0 "$model_pid" 2>/dev/null; then
@@ -167,7 +167,7 @@ export __GLX_VENDOR_LIBRARY_NAME="${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
   --seed 20260804 \
   --host 127.0.0.1 \
   --port "$ui_port" \
-  --model p2b \
+  --model p1b \
   --model-server-url "http://127.0.0.1:$model_port" \
   --model-max-history 10 \
   --model-hz 1.0 \

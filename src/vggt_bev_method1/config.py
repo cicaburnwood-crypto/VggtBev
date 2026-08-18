@@ -57,6 +57,10 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("data.merged_bev_output_size must be 800")
     if not str(data.get("split_manifest", "")).strip():
         raise ValueError("data.split_manifest is required")
+    if "void_coverage_index" in data and not str(
+        data.get("void_coverage_index", "")
+    ).strip():
+        raise ValueError("data.void_coverage_index cannot be empty when configured")
     if str(data.get("sampling_mode", "all_prefixes")) not in (
         "all_prefixes",
         "one_prefix_per_session",

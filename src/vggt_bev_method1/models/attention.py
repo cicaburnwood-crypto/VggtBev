@@ -23,6 +23,8 @@ class MultiheadAttention(nn.Module):
         self.heads = heads
         self.head_dim = hidden_dim // heads
         self.mode = mode
+        # Execution-only callable; absent from state_dict/checkpoint contracts.
+        self._compiled_forward_impl = None
         self.q_proj = nn.Linear(hidden_dim, hidden_dim)
         self.k_proj = nn.Linear(hidden_dim, hidden_dim)
         self.v_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -32,7 +34,31 @@ class MultiheadAttention(nn.Module):
         batch, length, _ = value.shape
         return value.view(batch, length, self.heads, self.head_dim).transpose(1, 2)
 
-    def forward(self, query: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+    def configure_execution_compilation(
+        self,
+        *,
+        backend: str,
+        mode: str,
+        dynamic: bool,
+    ) -> bool:
+        """Compile dense linear attention while leaving exact scale attention eager."""
+
+        if self.mode != "linear":
+            return False
+        self._compiled_forward_impl = torch.compile(
+            self._forward_impl,
+            backend=backend,
+            mode=mode,
+            dynamic=dynamic,
+            fullgraph=False,
+        )
+        return True
+
+    def _forward_impl(
+        self,
+        query: torch.Tensor,
+        context: torch.Tensor,
+    ) -> torch.Tensor:
         q = self._split(self.q_proj(query))
         k = self._split(self.k_proj(context))
         v = self._split(self.v_proj(context))
@@ -57,6 +83,10 @@ class MultiheadAttention(nn.Module):
             query.shape[0], query.shape[1], self.hidden_dim
         )
         return self.out_proj(output)
+
+    def forward(self, query: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        implementation = self._compiled_forward_impl or self._forward_impl
+        return implementation(query, context)
 
 
 class DeformableCrossAttention(nn.Module):
@@ -93,7 +123,9 @@ class DeformableCrossAttention(nn.Module):
         # state_dicts because it does not change the model or checkpoint
         # contract.
         self.memory_efficient_training = True
+        self.memory_efficient_checkpoint_fraction = 1.0
         self._compiled_forward_query_chunk = None
+        self._compiled_project_key_value = None
         self.query_projection = nn.Linear(hidden_dim, hidden_dim)
         self.key_projections = nn.ModuleList(
             [nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1) for _ in range(levels)]
@@ -130,6 +162,37 @@ class DeformableCrossAttention(nn.Module):
             dynamic=dynamic,
             fullgraph=False,
         )
+        self._compiled_project_key_value = torch.compile(
+            self._project_key_value,
+            backend=backend,
+            mode=mode,
+            dynamic=dynamic,
+            fullgraph=False,
+        )
+
+    @staticmethod
+    def _project_key_value(
+        flattened: torch.Tensor,
+        key_weight: torch.Tensor,
+        key_bias: torch.Tensor | None,
+        value_weight: torch.Tensor,
+        value_bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Apply equivalent K/V 1x1 projections in one convolution launch.
+
+        Weights remain separate Parameters, so state_dict keys, optimizer state,
+        gradients, and checkpoint compatibility are unchanged.
+        """
+
+        if (key_bias is None) != (value_bias is None):
+            raise ValueError("key and value projections must use matching bias modes")
+        weight = torch.cat((key_weight, value_weight), dim=0)
+        bias = (
+            None
+            if key_bias is None
+            else torch.cat((key_bias, value_bias), dim=0)
+        )
+        return F.conv2d(flattened, weight, bias)
 
     def _forward_query_chunk(
         self,
@@ -145,13 +208,12 @@ class DeformableCrossAttention(nn.Module):
         recomputed.
         """
 
-        if len(projected_level_tensors) != self.levels * 3:
-            raise ValueError("each feature level must provide key, value, offsets")
+        if len(projected_level_tensors) != self.levels * 2:
+            raise ValueError("each feature level must provide key/value and offsets")
         projected_levels = [
             (
-                projected_level_tensors[3 * index],
-                projected_level_tensors[3 * index + 1],
-                projected_level_tensors[3 * index + 2],
+                projected_level_tensors[2 * index],
+                projected_level_tensors[2 * index + 1],
             )
             for index in range(self.levels)
         ]
@@ -189,11 +251,10 @@ class DeformableCrossAttention(nn.Module):
             self.head_dim,
         )
         for level_index, (
-            key_feature,
-            value_feature,
+            key_value_feature,
             frame_offsets,
         ) in enumerate(projected_levels):
-            _, frames, _, height, width = key_feature.shape
+            _, frames, _, height, width = key_value_feature.shape
             grid = (
                 reference_chunk[None, :, None, None, :]
                 + query_offsets[:, :, level_index, None]
@@ -203,10 +264,13 @@ class DeformableCrossAttention(nn.Module):
                 grid.permute(0, 2, 1, 3, 4)
                 .reshape(batch * frames, chunk_size, self.samples, 2)
             )
-            sampled_key = F.grid_sample(
-                key_feature.reshape(
+            # Bilinear sampling is channel-independent, so concatenating K/V
+            # is exactly equivalent to two calls while halving grid_sample
+            # launches and grid reads.
+            sampled_key_value = F.grid_sample(
+                key_value_feature.reshape(
                     batch * frames,
-                    self.hidden_dim,
+                    self.hidden_dim * 2,
                     height,
                     width,
                 ),
@@ -215,34 +279,17 @@ class DeformableCrossAttention(nn.Module):
                 padding_mode="zeros",
                 align_corners=False,
             )
-            sampled_value = F.grid_sample(
-                value_feature.reshape(
-                    batch * frames,
-                    self.hidden_dim,
-                    height,
-                    width,
-                ),
-                grid,
-                mode="bilinear",
-                padding_mode="zeros",
-                align_corners=False,
+            sampled_key_value = sampled_key_value.view(
+                batch,
+                frames,
+                2,
+                self.heads,
+                self.head_dim,
+                chunk_size,
+                self.samples,
             )
-            sampled_key = sampled_key.view(
-                batch,
-                frames,
-                self.heads,
-                self.head_dim,
-                chunk_size,
-                self.samples,
-            ).permute(0, 2, 4, 1, 5, 3)
-            sampled_value = sampled_value.view(
-                batch,
-                frames,
-                self.heads,
-                self.head_dim,
-                chunk_size,
-                self.samples,
-            ).permute(0, 2, 4, 1, 5, 3)
+            sampled_key = sampled_key_value[:, :, 0].permute(0, 2, 4, 1, 5, 3)
+            sampled_value = sampled_key_value[:, :, 1].permute(0, 2, 4, 1, 5, 3)
             scores = (
                 query_heads[:, :, :, None, None] * sampled_key
             ).sum(dim=-1) * (self.head_dim**-0.5)
@@ -300,8 +347,20 @@ class DeformableCrossAttention(nn.Module):
                 height,
                 width,
             )
-            key = self.key_projections[level_index](flattened)
-            value = self.value_projections[level_index](flattened)
+            key_projection = self.key_projections[level_index]
+            value_projection = self.value_projections[level_index]
+            projection = (
+                self._compiled_project_key_value
+                if self._compiled_project_key_value is not None
+                else self._project_key_value
+            )
+            key_value = projection(
+                flattened,
+                key_projection.weight,
+                key_projection.bias,
+                value_projection.weight,
+                value_projection.bias,
+            )
             frame_summary = feature.mean(dim=(-2, -1))
             frame_offsets = self.frame_offset_projections[level_index](
                 frame_summary
@@ -309,8 +368,13 @@ class DeformableCrossAttention(nn.Module):
             frame_offsets = torch.tanh(frame_offsets) * (self.maximum_offset * 0.5)
             projected_levels.append(
                 (
-                    key.view(level_batch, frames, channels, height, width),
-                    value.view(level_batch, frames, channels, height, width),
+                    key_value.view(
+                        level_batch,
+                        frames,
+                        channels * 2,
+                        height,
+                        width,
+                    ),
                     frame_offsets,
                 )
             )
@@ -329,7 +393,20 @@ class DeformableCrossAttention(nn.Module):
             if self._compiled_forward_query_chunk is not None
             else self._forward_query_chunk
         )
-        for start in range(0, query_count, self.query_chunk_size):
+        chunk_count = (
+            query_count + self.query_chunk_size - 1
+        ) // self.query_chunk_size
+        checkpoint_fraction = min(
+            max(float(self.memory_efficient_checkpoint_fraction), 0.0),
+            1.0,
+        )
+        checkpoint_chunk_count = min(
+            chunk_count,
+            int(chunk_count * checkpoint_fraction + 0.999999),
+        )
+        for chunk_index, start in enumerate(
+            range(0, query_count, self.query_chunk_size)
+        ):
             end = min(start + self.query_chunk_size, query_count)
             query_chunk = query[:, start:end]
             reference_chunk = reference_grid[start:end]
@@ -338,6 +415,7 @@ class DeformableCrossAttention(nn.Module):
             )
             if (
                 self.memory_efficient_training
+                and chunk_index < checkpoint_chunk_count
                 and torch.is_grad_enabled()
                 and requires_backward
             ):
@@ -408,6 +486,27 @@ class DirectDecoderBlock(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim * expansion, hidden_dim),
         )
+        # Compile only the dense post-cross residual, not the Python chunk loop.
+        self._compiled_ffn_residual = None
+
+    def configure_execution_compilation(
+        self,
+        *,
+        backend: str,
+        mode: str,
+        dynamic: bool,
+    ) -> bool:
+        self._compiled_ffn_residual = torch.compile(
+            self._ffn_residual,
+            backend=backend,
+            mode=mode,
+            dynamic=dynamic,
+            fullgraph=False,
+        )
+        return True
+
+    def _ffn_residual(self, query: torch.Tensor) -> torch.Tensor:
+        return query + self.ffn(self.ffn_norm(query))
 
     def forward(
         self,
@@ -438,4 +537,5 @@ class DirectDecoderBlock(nn.Module):
                 self.context_norm(context),
             )
         query = query + cross
-        return query + self.ffn(self.ffn_norm(query))
+        implementation = self._compiled_ffn_residual or self._ffn_residual
+        return implementation(query)

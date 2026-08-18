@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forward/reverse RGB-sequence playback with live RGB-only P2B inference."""
+"""Forward/reverse RGB-sequence playback with live RGB-only P1B inference."""
 
 from __future__ import annotations
 
@@ -568,7 +568,7 @@ class VideoInferenceEngine:
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
         self.thread = threading.Thread(
-            target=self._run, name="video-p2b-inference", daemon=True
+            target=self._run, name="video-p1b-inference", daemon=True
         )
         self.track: VideoTrack | None = None
         self.frames: tuple[Path, ...] = ()
@@ -904,7 +904,7 @@ def make_handler(
     html: bytes,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "P2BVideoVisualizer/1.0"
+        server_version = "P1BVideoVisualizer/1.0"
 
         def _json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
             data = json.dumps(payload).encode("utf-8")
@@ -1023,7 +1023,7 @@ def main() -> None:
         (args.host, args.port), make_handler(engine, html)
     )
     server.daemon_threads = True
-    print(f"P2B video visualizer ready: http://{args.host}:{args.port}", flush=True)
+    print(f"P1B video visualizer ready: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:

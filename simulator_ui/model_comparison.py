@@ -23,6 +23,42 @@ def encode_png_base64(image: np.ndarray) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def decode_semantic_png_base64(encoded: str) -> np.ndarray:
+    """Decode a runtime semantic PNG without changing its class values."""
+
+    raw = base64.b64decode(encoded, validate=True)
+    with Image.open(io.BytesIO(raw)) as image:
+        semantic = np.asarray(image.convert("L"), dtype=np.uint8)
+    if semantic.ndim != 2 or semantic.shape[0] != semantic.shape[1]:
+        raise ValueError("runtime semantic output must be a square grayscale PNG")
+    return semantic.copy()
+
+
+def render_gt_fov_support(complete: np.ndarray) -> np.ndarray:
+    """Gray outside support and green inside, independent of occupancy."""
+
+    support = np.asarray(complete) != 112
+    rendered = np.full((*support.shape, 3), (112, 112, 112), dtype=np.uint8)
+    rendered[support] = (73, 206, 122)
+    return rendered
+
+
+def render_gt_observed_gate(
+    complete: np.ndarray,
+    visible: np.ndarray,
+) -> np.ndarray:
+    """Render the exact Policy-A Gate target: observed-free vs guessed."""
+
+    complete = np.asarray(complete)
+    visible = np.asarray(visible)
+    support = complete != 112
+    observed_free = support & (visible != 112) & (visible != 0)
+    rendered = np.full((*support.shape, 3), (112, 112, 112), dtype=np.uint8)
+    rendered[support] = (25, 54, 104)
+    rendered[observed_free] = (255, 197, 61)
+    return rendered
+
+
 @dataclass(frozen=True)
 class ComparisonFrame:
     frame_seq: int
@@ -32,6 +68,9 @@ class ComparisonFrame:
     gt_observed_by_model: dict[str, np.ndarray]
     gt_guessed_by_model: dict[str, np.ndarray]
     gt_merged_observed_by_model: dict[str, np.ndarray]
+    gt_merged_complete_by_model: dict[str, np.ndarray]
+    gt_merged_visible_by_model: dict[str, np.ndarray]
+    extrinsic: dict[str, Any]
 
 
 def runtime_request_payload(
@@ -69,6 +108,10 @@ class ModelComparisonWorker:
         self.model_extents_m = {
             key: float(extent) for key, extent in model_extents_m.items()
         }
+        self.merged_extents_m = dict(self.model_extents_m)
+        self.merged_output_sizes = {
+            key: int(bev_size) for key in self.model_extents_m
+        }
         self.bev_size = int(bev_size)
         self.sample_interval = 1.0 / sample_hz
         self.max_history = int(max_history)
@@ -87,7 +130,11 @@ class ModelComparisonWorker:
         self.segment_id = ""
         self.history_count = 0
         self.runtime_mode = "unknown"
+        self.visualization_mode = "p1b"
         self.latest: Optional[dict[str, Any]] = None
+        # Raw synchronized rasters are intentionally kept outside ``latest``;
+        # the latter must remain JSON-serializable for the browser endpoint.
+        self.latest_planning: Optional[dict[str, Any]] = None
         self.state: dict[str, Any] = {
             "ready": False,
             "status": "Waiting for model runtime",
@@ -102,6 +149,7 @@ class ModelComparisonWorker:
 
     def start(self) -> None:
         health = self._request_json("GET", "/health")
+        self.visualization_mode = str(health.get("visualization_mode", "p1b"))
         health_models = health.get("models")
         if isinstance(health_models, dict):
             self.runtime_mode = "multi"
@@ -114,6 +162,12 @@ class ModelComparisonWorker:
             health_models = {
                 model_key: {
                     "single_extent_m": health["single_extent_m"],
+                    "merged_extent_m": health.get(
+                        "merged_extent_m", health["single_extent_m"]
+                    ),
+                    "merged_output_size": health.get(
+                        "merged_output_size", self.bev_size
+                    ),
                     "checkpoint_epoch": health["checkpoint_epoch"],
                     "checkpoint_global_step": health[
                         "checkpoint_global_step"
@@ -130,6 +184,17 @@ class ModelComparisonWorker:
                     f"{model_key} server extent is {actual:g} m, "
                     f"UI expects {expected_extent:g} m"
                 )
+            self.merged_extents_m[model_key] = float(
+                health_models[model_key].get(
+                    "merged_extent_m", health.get("merged_extent_m", actual)
+                )
+            )
+            self.merged_output_sizes[model_key] = int(
+                health_models[model_key].get(
+                    "merged_output_size",
+                    health.get("merged_output_size", self.bev_size),
+                )
+            )
         if int(health["max_history"]) != self.max_history:
             raise RuntimeError(
                 "model server and UI must use the same maximum history length"
@@ -147,6 +212,9 @@ class ModelComparisonWorker:
                     "shared_vggt_backbone": bool(
                         health.get("shared_vggt_backbone")
                     ),
+                    "visualization_mode": self.visualization_mode,
+                    "merged_extents_m": dict(self.merged_extents_m),
+                    "merged_output_sizes": dict(self.merged_output_sizes),
                 }
             )
         self.thread.start()
@@ -197,6 +265,50 @@ class ModelComparisonWorker:
     def status(self) -> dict[str, Any]:
         with self.lock:
             return json.loads(json.dumps(self.state))
+
+    def planning_snapshot(
+        self,
+        model_key: str,
+        expected_frame_seq: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Return one atomic prediction-only runtime tuple for local planning.
+
+        GT renderings remain inside ``presentation_images`` for the browser,
+        but no GT array or simulator extrinsic is exposed as a numeric planner
+        input.
+        """
+
+        with self.lock:
+            if self.latest_planning is None:
+                raise RuntimeError("no synchronized model frame is ready")
+            frame_seq = int(self.latest_planning["frame_seq"])
+            if expected_frame_seq is not None and frame_seq != expected_frame_seq:
+                raise RuntimeError(
+                    f"requested frame {expected_frame_seq} is stale; latest is {frame_seq}"
+                )
+            models = self.latest_planning["models"]
+            if model_key not in models:
+                raise KeyError(f"model {model_key!r} is unavailable")
+            source = models[model_key]
+            return {
+                "frame_seq": frame_seq,
+                "model_key": model_key,
+                "predicted_semantic": source["predicted_semantic"].copy(),
+                "predicted_extent_m": float(source["predicted_extent_m"]),
+                "lambda_m_per_vggt": float(source["lambda_m_per_vggt"]),
+                "scale_std_m_per_vggt": float(
+                    source["scale_std_m_per_vggt"]
+                ),
+                "vggt_pose_frame_seqs": list(
+                    source["vggt_pose_frame_seqs"]
+                ),
+                "vggt_predicted_camera_from_world": json.loads(
+                    json.dumps(source["vggt_predicted_camera_from_world"])
+                ),
+                "presentation_images": json.loads(
+                    json.dumps(source["presentation_images"])
+                ),
+            }
 
     def _new_segment(self) -> None:
         self.segment_counter += 1
@@ -251,6 +363,7 @@ class ModelComparisonWorker:
                         next(iter(self.model_extents_m)): response
                     }
                 latest_models = {}
+                latest_planning_models = {}
                 for model_key, extent_m in self.model_extents_m.items():
                     prediction = response_models[model_key]
                     actual_extent = float(prediction["single_extent_m"])
@@ -259,6 +372,51 @@ class ModelComparisonWorker:
                             f"{model_key} prediction extent changed to "
                             f"{actual_extent:g} m"
                         )
+                    if self.visualization_mode == "merged_routing_geometry":
+                        merged_extent = float(prediction["merged_extent_m"])
+                        expected_merged_extent = self.merged_extents_m[model_key]
+                        if abs(merged_extent - expected_merged_extent) > 1e-6:
+                            raise RuntimeError(
+                                f"routing runtime merged extent changed from "
+                                f"{expected_merged_extent:g} to {merged_extent:g} m"
+                            )
+                        complete = frame.gt_merged_complete_by_model[model_key]
+                        visible = frame.gt_merged_visible_by_model[model_key]
+                        latest_models[model_key] = {
+                            "extent_m": merged_extent,
+                            "gt_fov_support_png_base64": encode_png_base64(
+                                render_gt_fov_support(complete)
+                            ),
+                            "gt_observed_gate_png_base64": encode_png_base64(
+                                render_gt_observed_gate(complete, visible)
+                            ),
+                            "gt_merged_complete_png_base64": encode_png_base64(
+                                complete
+                            ),
+                            "gt_merged_visible_png_base64": encode_png_base64(
+                                visible
+                            ),
+                            "predicted_fov_support_probability_png_base64": prediction[
+                                "predicted_fov_support_probability_png_base64"
+                            ],
+                            "predicted_fov_support_binary_png_base64": prediction[
+                                "predicted_fov_support_binary_png_base64"
+                            ],
+                            "predicted_observed_gate_probability_png_base64": prediction[
+                                "predicted_observed_gate_probability_png_base64"
+                            ],
+                            "predicted_observed_gate_binary_png_base64": prediction[
+                                "predicted_observed_gate_binary_png_base64"
+                            ],
+                            "merged_output_size": int(prediction["merged_output_size"]),
+                            "merged_latent_size": int(prediction["merged_latent_size"]),
+                            "checkpoint_epoch": int(prediction["checkpoint_epoch"]),
+                            "checkpoint_global_step": int(
+                                prediction["checkpoint_global_step"]
+                            ),
+                            "visualization_mode": self.visualization_mode,
+                        }
+                        continue
                     latest_models[model_key] = {
                         "extent_m": extent_m,
                         "gt_png_base64": encode_png_base64(
@@ -279,6 +437,10 @@ class ModelComparisonWorker:
                         "predicted_png_base64": prediction[
                             "model_single_png_base64"
                         ],
+                        "planning_semantic_png_base64": prediction.get(
+                            "model_single_semantic_png_base64",
+                            prediction["model_single_png_base64"],
+                        ),
                         "predicted_merged_png_base64": prediction.get(
                             "model_merged_png_base64"
                         ),
@@ -321,7 +483,7 @@ class ModelComparisonWorker:
                             prediction.get("merged_latent_size", 0)
                         ),
                         "visualization_mode": prediction.get(
-                            "visualization_mode", "p2b"
+                            "visualization_mode", "p1b"
                         ),
                         "checkpoint_epoch": int(
                             prediction["checkpoint_epoch"]
@@ -330,9 +492,65 @@ class ModelComparisonWorker:
                             prediction["checkpoint_global_step"]
                         ),
                     }
+                    predicted_semantic = decode_semantic_png_base64(
+                        prediction.get(
+                            "model_single_semantic_png_base64",
+                            prediction["model_single_png_base64"],
+                        )
+                    )
+                    lambda_m_per_vggt = float(
+                        prediction.get(
+                            "lambda_m_per_vggt", prediction["depth_scale"]
+                        )
+                    )
+                    pose_frame_seqs = prediction.get(
+                        "vggt_pose_frame_seqs",
+                        response.get("vggt_pose_frame_seqs", []),
+                    )
+                    predicted_camera_from_world = prediction.get(
+                        "vggt_predicted_camera_from_world",
+                        response.get(
+                            "vggt_predicted_camera_from_world", []
+                        ),
+                    )
+                    if len(pose_frame_seqs) != len(
+                        predicted_camera_from_world
+                    ):
+                        raise RuntimeError(
+                            "VGGT pose IDs and predicted extrinsics differ in length"
+                        )
+                    latest_models[model_key]["vggt_pose_available"] = bool(
+                        pose_frame_seqs
+                    )
+                    latest_models[model_key]["vggt_pose_frame_count"] = len(
+                        pose_frame_seqs
+                    )
+                    latest_planning_models[model_key] = {
+                        "predicted_semantic": predicted_semantic,
+                        "predicted_extent_m": actual_extent,
+                        "lambda_m_per_vggt": lambda_m_per_vggt,
+                        "scale_std_m_per_vggt": float(
+                            prediction["scale_std_m_per_vggt"]
+                        ),
+                        "vggt_pose_frame_seqs": [
+                            int(value) for value in pose_frame_seqs
+                        ],
+                        "vggt_predicted_camera_from_world": (
+                            json.loads(
+                                json.dumps(predicted_camera_from_world)
+                            )
+                        ),
+                        "presentation_images": json.loads(
+                            json.dumps(latest_models[model_key])
+                        ),
+                    }
                 latest = {"models": latest_models}
                 with self.lock:
                     self.latest = latest
+                    self.latest_planning = {
+                        "frame_seq": int(frame.frame_seq),
+                        "models": latest_planning_models,
+                    }
                     self.state.update(
                         {
                             "ready": True,

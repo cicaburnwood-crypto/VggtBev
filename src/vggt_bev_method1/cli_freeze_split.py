@@ -11,7 +11,7 @@ except ModuleNotFoundError:
 
 from vggt_bev_method1.config import load_config
 from vggt_bev_method1.data.manifest import create_split_manifest
-from vggt_bev_method1.p2b_config import load_p2b_config
+from vggt_bev_method1.p1b_config import load_p1b_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,8 +51,8 @@ def load_split_config(path: str | Path) -> dict:
     with resolved.open("rb") as stream:
         raw = tomllib.load(stream)
     pipeline = str(raw.get("training", {}).get("pipeline", ""))
-    if pipeline in ("P2B-NLL", "P2B-BCE"):
-        return load_p2b_config(resolved)
+    if pipeline in ("P1B-NLL", "P1B-BCE"):
+        return load_p1b_config(resolved)
     return load_config(resolved)
 
 
@@ -86,6 +86,9 @@ def main() -> None:
             else None
         ),
         source_writer_count=len(writers),
+        selection_order=str(
+            data.get("session_selection_order", "lexicographic_session_key")
+        ),
     )
     print(
         json.dumps(

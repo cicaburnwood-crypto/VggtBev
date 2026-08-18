@@ -6,7 +6,7 @@ readonly LOCAL_PORT="${2:-8892}"
 readonly REMOTE_PORT="${3:-8892}"
 readonly GPU0_OVERRIDE="${4:-}"
 readonly REMOTE_ALIAS="remote_gpu"
-readonly REMOTE_ROOT="/home/user/VGGT/method1_train_p2b_nll"
+readonly REMOTE_ROOT="/home/user/VGGT/method1_train_p1b_nll"
 
 if [[ ! "${GPU_INDEX}" =~ ^[0-7]$ ]]; then
   echo "Usage: $0 <free-physical-gpu-0..7> [local-port=8892] [remote-port=8892] [--allow-gpu0]" >&2

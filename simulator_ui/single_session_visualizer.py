@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone one-session P2B visualizer with no sweep/ranking dependency."""
+"""Standalone one-session P1B visualizer with no sweep/ranking dependency."""
 
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ ROOT = Path(__file__).resolve().parent
 HTML_FILE = ROOT / "web_ui/single_session.html"
 DEFAULT_DATA_ROOT = Path("/home/user/data/BEV")
 DEFAULT_BACKBONE_SOURCE = Path(
-    "/home/user/VGGT/method1_train_p2b_nll/vendor/backbone"
+    "/home/user/VGGT/method1_train_p1b_nll/vendor/backbone"
 )
 DEFAULT_BACKBONE_CHECKPOINT = Path(
-    "/home/user/VGGT/method1_train_p2b_nll/checkpoints/model.pt"
+    "/home/user/VGGT/method1_train_p1b_nll/checkpoints/model.pt"
 )
 
 
@@ -88,7 +88,7 @@ def make_handler(
     html: bytes,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "P2BSingleSession/1.0"
+        server_version = "P1BSingleSession/1.0"
 
         def _send_json(
             self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK

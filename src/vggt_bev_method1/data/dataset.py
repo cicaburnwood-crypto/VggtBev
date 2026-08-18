@@ -20,6 +20,7 @@ from .fov_targets import (
     load_world_from_bev_planar,
 )
 from .preprocess import RGBResizePad
+from .void_coverage import FINAL_GT_VOID_FILTER, VoidCoverageIndex
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,9 @@ class SessionRecord:
     source_height: int
     source_width: int
     depth_suffix: str
+    source_gt_depth_convention: str
     horizontal_fov_degrees: float
+    floor_height_m: float
     world_from_bev_planar: np.ndarray
 
     @property
@@ -52,13 +55,21 @@ def discover_sessions(root: str | Path) -> list[Path]:
     resolved = Path(root).expanduser().resolve()
     if not resolved.is_dir():
         raise FileNotFoundError(f"dataset root does not exist: {resolved}")
+    def committed(marker: Path) -> bool:
+        relative_parts = marker.parent.relative_to(resolved).parts
+        return (
+            marker.is_file()
+            and marker.parent.name.startswith("session_")
+            and not any(part.endswith(".partial") for part in relative_parts)
+        )
+
     sessions = sorted(
         marker.parent
-        for marker in resolved.glob("GPU*/session_*/COMPLETE")
-        if marker.is_file()
+        for marker in resolved.rglob("COMPLETE")
+        if committed(marker)
     )
     if not sessions:
-        raise ValueError(f"no complete GPU*/session_* directories found under {resolved}")
+        raise ValueError(f"no committed complete session directories found under {resolved}")
     return sessions
 
 
@@ -97,16 +108,23 @@ def _load_record(root: Path, path: Path) -> SessionRecord:
         raise ValueError(f"source merged target is not 512x512: {path}")
     if bev.get("masked_values") != {"occupied": 0, "unknown": 112, "free": 255}:
         raise ValueError(f"session BEV labels do not match the P1B contract: {path}")
-    if bev.get("merged_orientation") != (
-        "ego-centric in every output; latest robot centered and forward up"
-    ):
+    accepted_orientations = {
+        "ego-centric in every output; latest robot centered and forward up",
+        "ego-centric; latest robot centered and forward up",
+    }
+    if bev.get("merged_orientation") not in accepted_orientations:
         raise ValueError(f"session orientation is not latest-ego/forward-up: {path}")
 
     depth = metadata.get("depth", {})
     if str(depth.get("units", "")).lower() not in ("metres", "meters", "m"):
         raise ValueError(f"GT depth is not metric: {path}")
-    if "pinhole depth sensor" not in str(depth.get("source", "")).lower():
-        raise ValueError(f"GT depth source is not a pinhole z-depth sensor: {path}")
+    depth_source = str(depth.get("source", "")).strip().lower()
+    if depth_source == "habitat-sim pinhole depth sensor ground truth":
+        source_gt_depth_convention = "camera_axis_z_depth_m"
+    elif depth_source == "ai2-thor synchronized third-party metric depth ground truth":
+        source_gt_depth_convention = "euclidean_camera_ray_distance_m"
+    else:
+        raise ValueError(f"GT depth source/convention is unsupported: {path}")
 
     camera = metadata.get("camera_intrinsics", {})
     intrinsic = np.asarray(camera.get("K"), dtype=np.float32)
@@ -143,6 +161,12 @@ def _load_record(root: Path, path: Path) -> SessionRecord:
         extrinsic_records,
         expected_frames=frame_count,
     )
+    path_start = metadata.get("path", {}).get("start")
+    floor_height_m = (
+        float(path_start[1])
+        if isinstance(path_start, list) and len(path_start) >= 2
+        else float("nan")
+    )
     return SessionRecord(
         key=path.relative_to(root).as_posix(),
         path=path,
@@ -154,7 +178,9 @@ def _load_record(root: Path, path: Path) -> SessionRecord:
         source_height=source_height,
         source_width=source_width,
         depth_suffix=_depth_suffix(path, metadata),
+        source_gt_depth_convention=source_gt_depth_convention,
         horizontal_fov_degrees=horizontal_fov_degrees,
+        floor_height_m=floor_height_m,
         world_from_bev_planar=world_from_bev_planar,
     )
 
@@ -174,6 +200,8 @@ def load_session_records(
             relative = Path(key)
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError(f"session key is not a safe relative path: {key}")
+            if any(part.endswith(".partial") for part in relative.parts):
+                raise ValueError(f"session key has a partial ancestor: {key}")
             path = (resolved / relative).resolve()
             if not path.is_relative_to(resolved):
                 raise ValueError(f"session key escapes the dataset root: {key}")
@@ -242,6 +270,13 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         sample_stride: int = 1,
         minimum_history: int = 1,
         maximum_history: int = 34,
+        void_coverage_index: str | Path | None = None,
+        expected_manifest_sha256: str | None = None,
+        single_bev_extent_m: float = 6.5,
+        single_bev_output_size: int = 512,
+        merged_source_extent_m: float = 10.0,
+        merged_bev_extent_m: float = 10.0,
+        merged_bev_output_size: int = 800,
     ) -> None:
         if supervision != "metric_fov_complete_evidential":
             raise ValueError(
@@ -251,10 +286,46 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             raise ValueError("history and stride settings must be positive")
         if minimum_history > maximum_history:
             raise ValueError("minimum_history cannot exceed maximum_history")
+        if float(single_bev_extent_m) != 6.5 or int(single_bev_output_size) != 512:
+            raise ValueError("Single BEV grid must remain 6.5 m at 512x512")
+        if merged_source_extent_m <= 0.0:
+            raise ValueError("Merged source extent must be positive")
+        if not 0.0 < merged_bev_extent_m <= merged_source_extent_m:
+            raise ValueError(
+                "Merged output extent must be positive and no larger than its source"
+            )
+        if merged_bev_output_size <= 0:
+            raise ValueError("Merged output size must be positive")
         self.root = Path(root).expanduser().resolve()
         self.supervision = supervision
         self.preprocess = preprocess or RGBResizePad()
+        self.single_bev_extent_m = float(single_bev_extent_m)
+        self.single_bev_output_size = int(single_bev_output_size)
+        self.merged_source_extent_m = float(merged_source_extent_m)
+        self.merged_bev_extent_m = float(merged_bev_extent_m)
+        self.merged_bev_output_size = int(merged_bev_output_size)
+        self.void_coverage = (
+            VoidCoverageIndex(
+                void_coverage_index,
+                dataset_root=self.root,
+                expected_manifest_sha256=expected_manifest_sha256,
+                require_complete=True,
+                verify_artifacts=True,
+            )
+            if void_coverage_index is not None
+            else None
+        )
         self.sessions = tuple(load_session_records(self.root, session_keys))
+        if self.void_coverage is not None:
+            missing_scenes = sorted(
+                {session.scene_key for session in self.sessions}
+                - set(self.void_coverage.scenes)
+            )
+            if missing_scenes:
+                raise ValueError(
+                    "Void coverage does not include a training scene: "
+                    f"{missing_scenes[0]}"
+                )
         self.samples: list[SampleRecord] = []
         for session_index, session in enumerate(self.sessions):
             final_target = min(session.frame_count, maximum_history) - 1
@@ -289,12 +360,70 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             raise ValueError(f"GT depth must be HxW: {path}")
         return depth
 
+    @staticmethod
+    def _camera_ray_distance_to_z_depth(
+        depth: np.ndarray,
+        intrinsic: np.ndarray,
+    ) -> np.ndarray:
+        """Convert Euclidean camera-ray range to camera-axis z-depth."""
+        height, width = depth.shape
+        fx = float(intrinsic[0, 0])
+        fy = float(intrinsic[1, 1])
+        cx = float(intrinsic[0, 2])
+        cy = float(intrinsic[1, 2])
+        if fx <= 0.0 or fy <= 0.0:
+            raise ValueError("camera focal lengths must be positive")
+        x = (np.arange(width, dtype=np.float32) - cx) / fx
+        y = (np.arange(height, dtype=np.float32) - cy) / fy
+        ray_norm = np.sqrt(1.0 + y[:, None] ** 2 + x[None, :] ** 2)
+        return np.asarray(depth / ray_norm, dtype=np.float32)
+
     @classmethod
-    def _load_bev(cls, path: Path, *, output_size: int) -> torch.Tensor:
+    def _load_bev(
+        cls,
+        path: Path,
+        *,
+        source_extent_m: float,
+        output_extent_m: float,
+        output_size: int,
+    ) -> torch.Tensor:
+        """Load a metric raster, optionally center-cropping before resampling.
+
+        Source and output grids share the same latest-frame ego origin and
+        orientation.  Cropping the 10 m Merged raster to 6.5 m therefore keeps
+        only x,z in [-3.25, 3.25] m and never stretches the full 10 m map into
+        the smaller metric extent.
+        """
+
+        if source_extent_m <= 0.0 or output_extent_m <= 0.0:
+            raise ValueError("BEV metric extents must be positive")
+        if output_extent_m > source_extent_m:
+            raise ValueError("BEV output extent cannot exceed source extent")
+        if output_size <= 0:
+            raise ValueError("BEV output size must be positive")
         with Image.open(path) as image:
             if image.mode != "L" or image.size != (512, 512):
                 raise ValueError(f"metric BEV target must be 512x512 grayscale: {path}")
-            if output_size != 512:
+            if output_extent_m < source_extent_m:
+                source_size = image.width
+                margin_px = (
+                    0.5
+                    * (source_extent_m - output_extent_m)
+                    * source_size
+                    / source_extent_m
+                )
+                image = image.transform(
+                    (output_size, output_size),
+                    Image.Transform.EXTENT,
+                    (
+                        margin_px,
+                        margin_px,
+                        source_size - margin_px,
+                        source_size - margin_px,
+                    ),
+                    resample=Image.Resampling.NEAREST,
+                )
+            elif output_size != 512:
                 image = image.resize(
                     (output_size, output_size),
                     Image.Resampling.NEAREST,
@@ -344,7 +473,13 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 / "depth"
                 / f"frame_{frame:06d}{session.depth_suffix}"
             )
-            depth, valid = self.preprocess.depth(self._load_depth(depth_path))
+            source_depth = self._load_depth(depth_path)
+            if session.source_gt_depth_convention == "euclidean_camera_ray_distance_m":
+                source_depth = self._camera_ray_distance_to_z_depth(
+                    source_depth,
+                    session.intrinsic,
+                )
+            depth, valid = self.preprocess.depth(source_depth)
             depths.append(depth)
             depth_valid.append(valid)
 
@@ -370,6 +505,8 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         )
         source_single_complete = self._load_bev(
             single_complete_path,
+            source_extent_m=self.single_bev_extent_m,
+            output_extent_m=self.single_bev_extent_m,
             output_size=self.single_bev_output_size,
         )
         if bool((source_single_complete == self.labels.unknown).any()):
@@ -378,14 +515,20 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             )
         source_single_visible = self._load_bev(
             single_observed_path,
+            source_extent_m=self.single_bev_extent_m,
+            output_extent_m=self.single_bev_extent_m,
             output_size=self.single_bev_output_size,
         )
         source_merged_complete = self._load_bev(
             merged_complete_path,
+            source_extent_m=self.merged_source_extent_m,
+            output_extent_m=self.merged_bev_extent_m,
             output_size=self.merged_bev_output_size,
         )
         source_merged_visible = self._load_bev(
             merged_observed_path,
+            source_extent_m=self.merged_source_extent_m,
+            output_extent_m=self.merged_bev_extent_m,
             output_size=self.merged_bev_output_size,
         )
         self._validate_bev_pair(
@@ -445,6 +588,37 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             merged_visible,
             name="merged FOV-complete",
         )
+        if self.void_coverage is None:
+            single_gt_valid = torch.ones_like(
+                single_fov_support, dtype=torch.bool
+            )
+            merged_gt_valid = torch.ones_like(
+                merged_fov_support, dtype=torch.bool
+            )
+            void_index_sha256 = None
+        else:
+            if not np.isfinite(session.floor_height_m):
+                raise ValueError(
+                    f"Void filtering requires a valid floor height: {session.path}"
+                )
+            reference_pose = session.world_from_bev_planar[target_frame]
+            # GT validity comes only from the repaired global scene geometry
+            # and the output-grid pose. FOV and masked visibility are not inputs.
+            single_gt_valid = self.void_coverage.render_valid_mask(
+                scene_key=session.scene_key,
+                floor_height_m=session.floor_height_m,
+                world_from_bev_planar=reference_pose,
+                output_size=self.single_bev_output_size,
+                output_extent_m=self.single_bev_extent_m,
+            )
+            merged_gt_valid = self.void_coverage.render_valid_mask(
+                scene_key=session.scene_key,
+                floor_height_m=session.floor_height_m,
+                world_from_bev_planar=reference_pose,
+                output_size=self.merged_bev_output_size,
+                output_extent_m=self.merged_bev_extent_m,
+            )
+            void_index_sha256 = self.void_coverage.content_sha256
         intrinsic = self.preprocess.intrinsics(
             session.intrinsic,
             source_height=session.source_height,
@@ -461,9 +635,11 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             "single_fov_complete_target": single_fov_complete,
             "single_visible_target": single_visible,
             "single_fov_support_target": single_fov_support,
+            "single_gt_valid_mask": single_gt_valid,
             "merged_fov_complete_target": merged_fov_complete,
             "merged_visible_target": merged_visible,
             "merged_fov_support_target": merged_fov_support,
+            "merged_gt_valid_mask": merged_gt_valid,
             "metadata": {
                 "sample_id": f"{session.key}:frame_{target_frame:06d}",
                 "session_key": session.key,
@@ -481,6 +657,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 "fov_target_generation": "on_the_fly_unobstructed_horizontal_frustum_v1",
                 "horizontal_fov_degrees": session.horizontal_fov_degrees,
                 "gt_depth_convention": "camera_axis_z_depth_m",
+                "source_gt_depth_convention": session.source_gt_depth_convention,
                 "preprocessing_version": self.preprocess.version,
                 "coordinate_mode": "p1b_fixed_metric",
                 "single_bev_extent_m": self.single_bev_extent_m,
@@ -494,7 +671,18 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 "merged_bev_cell_size_m": (
                     self.merged_bev_extent_m / self.merged_bev_output_size
                 ),
-                "merged_bev_bounds_m": [-5.0, 5.0, -5.0, 5.0],
+                "merged_bev_bounds_m": [
+                    -self.merged_bev_extent_m / 2.0,
+                    self.merged_bev_extent_m / 2.0,
+                    -self.merged_bev_extent_m / 2.0,
+                    self.merged_bev_extent_m / 2.0,
+                ],
+                "merged_source_extent_m": self.merged_source_extent_m,
+                "merged_target_transform": (
+                    "identity"
+                    if self.merged_bev_extent_m == self.merged_source_extent_m
+                    else "latest_ego_metric_center_crop_then_nearest_resample"
+                ),
                 "orientation": "latest ego centered; forward is image-up",
                 "runtime_model_inputs": ["rgb_window"],
                 "bev_content_supervision": (
@@ -504,5 +692,23 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                     "visible_masked_vs_fov_complete_occluded_relationship"
                 ),
                 "outside_fov_semantics": "unknown",
+                "gt_void_filter": (
+                    FINAL_GT_VOID_FILTER
+                    if self.void_coverage is not None
+                    else "disabled"
+                ),
+                "gt_void_scope": "all_bev_losses_independent_of_fov_and_mask",
+                "complete_gt_contract": (
+                    "semantic_target_plus_independent_gt_valid_mask"
+                ),
+                "void_training_semantics": (
+                    "gt_valid_mask_false_hard_ignores_every_bev_loss"
+                ),
+                "scene_coverage_algorithm": (
+                    self.void_coverage.algorithm
+                    if self.void_coverage is not None
+                    else "disabled"
+                ),
+                "void_coverage_index_sha256": void_index_sha256,
             },
         }

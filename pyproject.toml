@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "odineye-p2b"
-version = "3.1.0"
+name = "odineye-p1b"
+version = "4.0.0"
 description = "Two-expert FOV-complete BEVs with NLL/BCE variants and metric scale"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,11 +16,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8"]
+void-audit = ["scipy>=1.10"]
 
 [project.scripts]
-odineye-p1b-train = "vggt_bev_method1.cli_train_metric:main"
+odineye-p1b-legacy-train = "vggt_bev_method1.cli_train_metric:main"
 odineye-p1b-freeze-split = "vggt_bev_method1.cli_freeze_split:main"
-odineye-p2b-train = "vggt_bev_method1.cli_train_p2b:main"
+odineye-p1b-train = "vggt_bev_method1.cli_train_p1b:main"
+odineye-p1b-eval = "vggt_bev_method1.cli_eval_p1b:main"
+odineye-p1b-void-audit = "p1b_void_audit.cli:main"
+odineye-p1b-single-astar = "vggt_bev_method1.cli_realtime_astar:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

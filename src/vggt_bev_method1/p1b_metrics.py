@@ -3,12 +3,14 @@ from __future__ import annotations
 import torch
 
 from vggt_bev_method1.config import LabelValues
-from vggt_bev_method1.data.p2b_targets import (
+from vggt_bev_method1.data.p1b_targets import (
     ROUTING_GUESSED_FREE,
     ROUTING_GUESSED_OCCUPIED,
     ROUTING_OBSERVED_FREE,
-    p2b_region_masks,
+    p1b_region_masks,
 )
+
+DEFAULT_LABEL_VALUES = LabelValues()
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
@@ -31,48 +33,58 @@ def _pixel_class_counts(
     )
 
 
-def p2b_metric_totals(
+def p1b_metric_totals(
     prediction: dict,
     complete_target: torch.Tensor,
     visible_target: torch.Tensor,
     support_target: torch.Tensor,
     *,
-    labels: LabelValues = LabelValues(),
+    gt_valid_mask: torch.Tensor | None = None,
+    labels: LabelValues = DEFAULT_LABEL_VALUES,
 ) -> dict[str, torch.Tensor]:
-    masks = p2b_region_masks(
+    masks = p1b_region_masks(
         complete_target,
         visible_target,
         support_target,
         labels=labels,
     )
+    if gt_valid_mask is None:
+        gt_valid = torch.ones_like(masks.valid)
+    else:
+        if gt_valid_mask.shape != complete_target.shape:
+            raise ValueError("gt_valid_mask must align with the BEV target")
+        gt_valid = gt_valid_mask.bool()
+    semantic_metric_valid = masks.valid & gt_valid
+    guessed_metric_valid = masks.guessed & semantic_metric_valid
     device = complete_target.device
     routing_predicted = prediction["routing_probability"].argmax(dim=1)
     routing_counts = {
         "routing_free": _pixel_class_counts(
             routing_predicted,
             masks.routing_target,
-            masks.valid,
+            semantic_metric_valid,
             ROUTING_OBSERVED_FREE,
         ),
         "routing_guessed_free": _pixel_class_counts(
             routing_predicted,
             masks.routing_target,
-            masks.valid,
+            semantic_metric_valid,
             ROUTING_GUESSED_FREE,
         ),
         "routing_guessed_occupied": _pixel_class_counts(
             routing_predicted,
             masks.routing_target,
-            masks.valid,
+            semantic_metric_valid,
             ROUTING_GUESSED_OCCUPIED,
         ),
     }
-    predicted_guessed = masks.valid & (
+    predicted_guessed = semantic_metric_valid & (
         routing_predicted != ROUTING_OBSERVED_FREE
     )
-    routing_guessed_tp = (predicted_guessed & masks.guessed).sum()
-    routing_guessed_fp = (predicted_guessed & ~masks.guessed).sum()
-    routing_guessed_fn = (~predicted_guessed & masks.guessed).sum()
+    gt_guessed = semantic_metric_valid & masks.guessed
+    routing_guessed_tp = (predicted_guessed & gt_guessed).sum()
+    routing_guessed_fp = (predicted_guessed & ~gt_guessed).sum()
+    routing_guessed_fn = (semantic_metric_valid & ~predicted_guessed & gt_guessed).sum()
 
     # Monitor the Observed Gate itself, independently of the final three-way
     # routing argmax. Its GT is exactly the masked-BEV observed-free region.
@@ -81,16 +93,18 @@ def p2b_metric_totals(
     )
     observed_gate_truth = masks.observed_free
     observed_gate_tp = (
-        masks.valid & observed_gate_predicted & observed_gate_truth
+        semantic_metric_valid & observed_gate_predicted & observed_gate_truth
     ).sum()
     observed_gate_fp = (
-        masks.valid & observed_gate_predicted & ~observed_gate_truth
+        semantic_metric_valid & observed_gate_predicted & ~observed_gate_truth
     ).sum()
     observed_gate_fn = (
-        masks.valid & ~observed_gate_predicted & observed_gate_truth
+        semantic_metric_valid & ~observed_gate_predicted & observed_gate_truth
     ).sum()
     surface_gate_predicted = ~observed_gate_predicted
-    direct_band = masks.observed_free | masks.visible_surface
+    direct_band = semantic_metric_valid & (
+        masks.observed_free | masks.visible_surface
+    )
     surface_gate_tp = (
         direct_band & surface_gate_predicted & masks.visible_surface
     ).sum()
@@ -104,39 +118,44 @@ def p2b_metric_totals(
     guessed_probability = prediction["guessed"]["occupancy_probability"].float()
     guessed_predicted = guessed_probability >= 0.5
     guessed_truth = masks.occupied
-    guessed_tp = (masks.guessed & guessed_predicted & guessed_truth).sum()
-    guessed_fp = (masks.guessed & guessed_predicted & ~guessed_truth).sum()
-    guessed_fn = (masks.guessed & ~guessed_predicted & guessed_truth).sum()
-    guessed_tn = (masks.guessed & ~guessed_predicted & ~guessed_truth).sum()
+    guessed_tp = (guessed_metric_valid & guessed_predicted & guessed_truth).sum()
+    guessed_fp = (guessed_metric_valid & guessed_predicted & ~guessed_truth).sum()
+    guessed_fn = (guessed_metric_valid & ~guessed_predicted & guessed_truth).sum()
+    guessed_tn = (guessed_metric_valid & ~guessed_predicted & ~guessed_truth).sum()
+    hidden_metric_valid = masks.hidden_guessed & guessed_metric_valid
     hidden_guessed_tp = (
-        masks.hidden_guessed & guessed_predicted & masks.hidden_guessed_occupied
+        hidden_metric_valid & guessed_predicted & masks.hidden_guessed_occupied
     ).sum()
     hidden_guessed_fp = (
-        masks.hidden_guessed & guessed_predicted & ~masks.hidden_guessed_occupied
+        hidden_metric_valid & guessed_predicted & ~masks.hidden_guessed_occupied
     ).sum()
     hidden_guessed_fn = (
-        masks.hidden_guessed & ~guessed_predicted & masks.hidden_guessed_occupied
+        hidden_metric_valid & ~guessed_predicted & masks.hidden_guessed_occupied
     ).sum()
 
     fused_probability = prediction["fused"]["occupancy_probability"].float()
     fused_predicted = fused_probability >= 0.5
-    observed_free_fp = (masks.observed_free & fused_predicted).sum()
-    observed_free_count = masks.observed_free.sum()
-    fused_surface_tp = (masks.visible_surface & fused_predicted).sum()
-    fused_surface_fp = (masks.observed_free & fused_predicted).sum()
-    fused_surface_fn = (masks.visible_surface & ~fused_predicted).sum()
+    valid_observed_free = semantic_metric_valid & masks.observed_free
+    valid_visible_surface = semantic_metric_valid & masks.visible_surface
+    observed_free_fp = (valid_observed_free & fused_predicted).sum()
+    observed_free_count = valid_observed_free.sum()
+    fused_surface_tp = (valid_visible_surface & fused_predicted).sum()
+    fused_surface_fp = (valid_observed_free & fused_predicted).sum()
+    fused_surface_fn = (valid_visible_surface & ~fused_predicted).sum()
 
     support_predicted = prediction["fov_support_probability"] >= 0.5
-    support_tp = (support_predicted & masks.valid).sum()
-    support_fp = (support_predicted & ~masks.valid).sum()
-    support_fn = (~support_predicted & masks.valid).sum()
+    support_tp = (gt_valid & support_predicted & masks.valid).sum()
+    support_fp = (gt_valid & support_predicted & ~masks.valid).sum()
+    support_fn = (gt_valid & ~support_predicted & masks.valid).sum()
 
     correct = fused_predicted == masks.occupied
     confidence = prediction["fused"]["navigation_confidence"].float()
     confidence_error = (confidence - correct.to(confidence.dtype)).square()
-    confidence_brier_sum = confidence_error[masks.valid].sum()
-    confidence_count = masks.valid.sum()
-    high_confidence_wrong = (masks.valid & ~correct & (confidence >= 0.8)).sum()
+    confidence_brier_sum = confidence_error[semantic_metric_valid].sum()
+    confidence_count = semantic_metric_valid.sum()
+    high_confidence_wrong = (
+        semantic_metric_valid & ~correct & (confidence >= 0.8)
+    ).sum()
 
     def count(value: torch.Tensor) -> torch.Tensor:
         return value.to(device=device, dtype=torch.float64)
@@ -169,6 +188,8 @@ def p2b_metric_totals(
         "confidence_brier_sum": count(confidence_brier_sum),
         "confidence_count": count(confidence_count),
         "high_confidence_wrong": count(high_confidence_wrong),
+        "gt_valid_count": count(semantic_metric_valid.sum()),
+        "gt_void_count": count((masks.valid & ~gt_valid).sum()),
     }
     for name, (true_positive, false_positive, false_negative) in routing_counts.items():
         output[f"{name}_tp"] = count(true_positive)
@@ -177,7 +198,7 @@ def p2b_metric_totals(
     return output
 
 
-def finalize_p2b_metrics(totals: dict[str, float]) -> dict[str, float]:
+def finalize_p1b_metrics(totals: dict[str, float]) -> dict[str, float]:
     def precision(prefix: str) -> float:
         return _safe_ratio(
             totals[f"{prefix}_tp"],
@@ -263,5 +284,10 @@ def finalize_p2b_metrics(totals: dict[str, float]) -> dict[str, float]:
         ),
         "high_confidence_wrong_rate": _safe_ratio(
             totals["high_confidence_wrong"], totals["confidence_count"]
+        ),
+        "gt_void_inside_support_fraction": _safe_ratio(
+            totals.get("gt_void_count", 0.0),
+            totals.get("gt_void_count", 0.0)
+            + totals.get("gt_valid_count", 0.0),
         ),
     }

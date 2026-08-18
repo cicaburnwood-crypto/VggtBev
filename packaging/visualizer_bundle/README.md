@@ -1,11 +1,11 @@
-# P2B 10-scene local visualizer
+# P1B 10-scene local visualizer
 
 Run `./start_visualizer.sh` or double-click `Launch_Visualizer.desktop`.
 
 The bundle runs entirely on this PC:
 
 - Habitat-Sim and all ten scene/navmesh pairs are under `scenes/`;
-- P2B-NLL epoch 10, step 14320 is under `checkpoints/`;
+- P1B-NLL epoch 10, step 14320 is under `checkpoints/`;
 - the frozen VGGT-Omega checkpoint is also bundled;
 - both Python environments are bundled under `runtime/`;
 - the model runtime binds to `127.0.0.1:8896`;

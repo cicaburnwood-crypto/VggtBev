@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a P2B runtime audit and freeze a ranked, scene-safe retraining subset.
+"""Export a P1B runtime audit and freeze a ranked, scene-safe retraining subset.
 
 The source manifest already owns the scene-grouped train/validation split.  This
 tool ranks sessions *inside each existing split*, so a lower-loss training

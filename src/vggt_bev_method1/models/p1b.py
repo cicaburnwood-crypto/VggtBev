@@ -10,16 +10,67 @@ from .method1 import (
     MultiScaleTokenProjector,
     _metric_query_coordinates,
 )
-from .p2b_probability import (
+from .p1b_probability import (
     ProbabilityModel,
     compose_semantic,
     decode_binary_prediction,
     fuse_pixel_routing,
 )
 
+_LEGACY_PROJECTOR_PREFIXES = {
+    "guessed_token_projector.": (
+        "single_guessed_token_projector.",
+        "merged_guessed_token_projector.",
+    ),
+    "routing_token_projector.": (
+        "single_routing_token_projector.",
+        "merged_routing_token_projector.",
+    ),
+}
+
+
+def branch_specific_projector_state_dict(state_dict: dict) -> dict:
+    """Expand a historical shared-projector head state without changing outputs.
+
+    Old checkpoints used one Guessed and one Routing projector for both BEV
+    branches. Copying each tensor into both new branch-local projectors keeps
+    old Single and Merged runtime predictions exactly equivalent at load time.
+    """
+
+    has_legacy = any(
+        key.startswith(prefix)
+        for prefix in _LEGACY_PROJECTOR_PREFIXES
+        for key in state_dict
+    )
+    if not has_legacy:
+        return state_dict
+    has_branch_specific = any(
+        key.startswith(target)
+        for targets in _LEGACY_PROJECTOR_PREFIXES.values()
+        for target in targets
+        for key in state_dict
+    )
+    if has_branch_specific:
+        raise RuntimeError(
+            "checkpoint mixes shared and branch-specific P1B projectors"
+        )
+    migrated = state_dict.copy()
+    if hasattr(state_dict, "_metadata"):
+        migrated._metadata = state_dict._metadata  # type: ignore[attr-defined]
+    for source_prefix, target_prefixes in _LEGACY_PROJECTOR_PREFIXES.items():
+        source_keys = [
+            key for key in tuple(migrated) if key.startswith(source_prefix)
+        ]
+        for source_key in source_keys:
+            value = migrated.pop(source_key)
+            suffix = source_key.removeprefix(source_prefix)
+            for target_prefix in target_prefixes:
+                migrated[target_prefix + suffix] = value
+    return migrated
+
 
 class DenseMetricQueryDecoder(nn.Module):
-    """Independent metric-query decoder used by one P2B role."""
+    """Independent metric-query decoder used by one P1B role."""
 
     def __init__(
         self,
@@ -132,13 +183,26 @@ class PixelRoutedBEVDecoder(nn.Module):
         self,
         guessed_pyramid: list[torch.Tensor],
         routing_pyramid: list[torch.Tensor],
+        *,
+        assemble_runtime_outputs: bool = True,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
         guessed = decode_binary_prediction(
-            self.guessed(guessed_pyramid), self.probability_model
+            self.guessed(guessed_pyramid),
+            self.probability_model,
+            include_diagnostics=assemble_runtime_outputs,
         )
         routing_raw = self.routing(routing_pyramid).float()
         observed_gate_logit = routing_raw[:, 0]
         support_logit = routing_raw[:, 1]
+        support_probability = torch.sigmoid(support_logit)
+        output: dict[str, dict[str, torch.Tensor] | torch.Tensor] = {
+            "guessed": guessed,
+            "observed_gate_logit": observed_gate_logit,
+            "fov_support_logit": support_logit,
+            "fov_support_probability": support_probability,
+        }
+        if not assemble_runtime_outputs:
+            return output
         observed_gate_probability = torch.sigmoid(observed_gate_logit)
         guessed_region_probability = 1.0 - observed_gate_probability
         guessed_occupied_probability = (
@@ -156,15 +220,13 @@ class PixelRoutedBEVDecoder(nn.Module):
             ),
             dim=1,
         )
-        support_probability = torch.sigmoid(support_logit)
         fused = fuse_pixel_routing(
             routing_probability,
             guessed,
             support_probability,
             self.probability_model,
         )
-        return {
-            "guessed": guessed,
+        output.update({
             "routing_probability": routing_probability,
             "routing_class": routing_probability.argmax(dim=1),
             "observed_gate_logit": observed_gate_logit,
@@ -181,10 +243,31 @@ class PixelRoutedBEVDecoder(nn.Module):
             "fov_complete_semantic": compose_semantic(
                 fused, support_probability
             ),
+        })
+        return output
+
+    def forward_routing_geometry(
+        self,
+        routing_pyramid: list[torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Decode only Observed Gate and FOV support for the Merged stage.
+
+        The Guessed decoder is deliberately not executed.  Both routing
+        channels receive direct pixelwise supervision in the combined stage.
+        """
+
+        routing_raw = self.routing(routing_pyramid).float()
+        observed_gate_logit = routing_raw[:, 0]
+        support_logit = routing_raw[:, 1]
+        return {
+            "observed_gate_logit": observed_gate_logit,
+            "observed_gate_probability": torch.sigmoid(observed_gate_logit),
+            "fov_support_logit": support_logit,
+            "fov_support_probability": torch.sigmoid(support_logit),
         }
 
 
-class P2BHead(nn.Module):
+class P1BHead(nn.Module):
     """Observed-free routing, guessed completion and metric Scale Token."""
 
     def __init__(
@@ -215,7 +298,7 @@ class P2BHead(nn.Module):
             raise ValueError("probability_model must be evidential or bce")
         if int(single_latent_bev_size) != int(single_output_size):
             raise ValueError(
-                "P2B single BEV must decode natively at output resolution; "
+                "P1B single BEV must decode natively at output resolution; "
                 "latent upsampling is forbidden"
             )
         self.probability_model: ProbabilityModel = probability_model
@@ -225,12 +308,19 @@ class P2BHead(nn.Module):
             hidden_dim,
             spatial_scales,
         )
-        # Routing and completion share only frozen raw VGGT tokens. Their
-        # trainable projectors/decoders remain independent.
-        self.guessed_token_projector = MultiScaleTokenProjector(
+        # Single and Merged share only frozen raw VGGT tokens. Every trainable
+        # projector and decoder is branch-local so Merged optimization cannot
+        # change a frozen Single baseline.
+        self.single_guessed_token_projector = MultiScaleTokenProjector(
             *projector_arguments
         )
-        self.routing_token_projector = MultiScaleTokenProjector(
+        self.single_routing_token_projector = MultiScaleTokenProjector(
+            *projector_arguments
+        )
+        self.merged_guessed_token_projector = MultiScaleTokenProjector(
+            *projector_arguments
+        )
+        self.merged_routing_token_projector = MultiScaleTokenProjector(
             *projector_arguments
         )
         self.scale_token_projector = MultiScaleTokenProjector(
@@ -267,12 +357,30 @@ class P2BHead(nn.Module):
             predict_uncertainty=predict_scale_uncertainty,
         )
 
-    def _pyramids(self, extraction: dict) -> tuple[list[torch.Tensor], ...]:
+    def load_state_dict(
+        self,
+        state_dict: dict,
+        strict: bool = True,
+        assign: bool = False,
+    ):
+        return super().load_state_dict(
+            branch_specific_projector_state_dict(state_dict),
+            strict=strict,
+            assign=assign,
+        )
+
+    def _pyramids(
+        self,
+        extraction: dict,
+        branch: str,
+    ) -> tuple[list[torch.Tensor], ...]:
+        if branch not in ("single", "merged"):
+            raise ValueError(f"unknown BEV branch: {branch}")
         tokens = extraction["tokens"]
         grid = extraction["patch_grid"]
         return (
-            self.guessed_token_projector(tokens, grid),
-            self.routing_token_projector(tokens, grid),
+            getattr(self, f"{branch}_guessed_token_projector")(tokens, grid),
+            getattr(self, f"{branch}_routing_token_projector")(tokens, grid),
         )
 
     def forward(
@@ -281,21 +389,42 @@ class P2BHead(nn.Module):
         *,
         enabled_bev_branches: tuple[str, ...] = ("single", "merged"),
         include_scale: bool = True,
+        assemble_runtime_outputs: bool = True,
+        bev_objective: str = "full",
     ) -> dict:
         unknown = set(enabled_bev_branches).difference(("single", "merged"))
         if unknown:
             raise ValueError(f"unknown BEV branches: {sorted(unknown)}")
+        if bev_objective not in (
+            "full",
+            "fov_support_only",
+            "fov_support_and_observed_gate",
+        ):
+            raise ValueError(f"unknown BEV objective: {bev_objective}")
+        if bev_objective != "full" and enabled_bev_branches != ("merged",):
+            raise ValueError("routing-geometry decoding requires Merged only")
         output: dict = {}
-        if enabled_bev_branches:
-            guessed, routing = self._pyramids(extraction)
-            if "single" in enabled_bev_branches:
-                output["single_bev"] = self.single_bev_decoder(
-                    [level[:, -1:] for level in guessed],
-                    [level[:, -1:] for level in routing],
+        if "single" in enabled_bev_branches:
+            guessed, routing = self._pyramids(extraction, "single")
+            output["single_bev"] = self.single_bev_decoder(
+                [level[:, -1:] for level in guessed],
+                [level[:, -1:] for level in routing],
+                assemble_runtime_outputs=assemble_runtime_outputs,
+            )
+        if "merged" in enabled_bev_branches:
+            if bev_objective != "full":
+                routing = self.merged_routing_token_projector(
+                    extraction["tokens"], extraction["patch_grid"]
                 )
-            if "merged" in enabled_bev_branches:
+                output["merged_bev"] = (
+                    self.merged_bev_decoder.forward_routing_geometry(routing)
+                )
+            else:
+                guessed, routing = self._pyramids(extraction, "merged")
                 output["merged_bev"] = self.merged_bev_decoder(
-                    guessed, routing
+                    guessed,
+                    routing,
+                    assemble_runtime_outputs=assemble_runtime_outputs,
                 )
         if include_scale:
             scale_pyramid = self.scale_token_projector(
@@ -305,18 +434,18 @@ class P2BHead(nn.Module):
         return output
 
 
-class P2BSystem(nn.Module):
-    """One frozen VGGT aggregation followed by the trainable P2B head."""
+class P1BSystem(nn.Module):
+    """One frozen VGGT aggregation followed by the trainable P1B head."""
 
     def __init__(self, adapter: nn.Module, **head_arguments) -> None:
         super().__init__()
         self.adapter = adapter
-        self.head = P2BHead(**head_arguments)
+        self.head = P1BHead(**head_arguments)
 
-    def unwrapped_head(self) -> P2BHead:
+    def unwrapped_head(self) -> P1BHead:
         module = getattr(self.head, "module", self.head)
-        if not isinstance(module, P2BHead):
-            raise TypeError("P2B trainable head has an unexpected module type")
+        if not isinstance(module, P1BHead):
+            raise TypeError("P1B trainable head has an unexpected module type")
         return module
 
     def extract(self, images: torch.Tensor) -> dict:
@@ -328,22 +457,26 @@ class P2BSystem(nn.Module):
         *,
         enabled_bev_branches: tuple[str, ...] = ("single", "merged"),
         include_scale: bool = True,
+        assemble_runtime_outputs: bool = True,
+        bev_objective: str = "full",
     ) -> dict:
         prediction = self.head(
             extraction,
             enabled_bev_branches=enabled_bev_branches,
             include_scale=include_scale,
+            assemble_runtime_outputs=assemble_runtime_outputs,
+            bev_objective=bev_objective,
         )
         head = self.unwrapped_head()
         output = {
             **prediction,
             "pipeline_id": (
-                "P2B-NLL"
+                "P1B-NLL"
                 if head.probability_model == "evidential"
-                else "P2B-BCE"
+                else "P1B-BCE"
             ),
             "probability_model": head.probability_model,
-            "coordinate_mode": "p2b_fixed_metric",
+            "coordinate_mode": "p1b_fixed_metric",
             "enabled_bev_branches": enabled_bev_branches,
             "scale_enabled": include_scale,
             "orientation": "latest ego centered; forward is image-up",

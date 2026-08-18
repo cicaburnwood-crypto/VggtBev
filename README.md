@@ -1,4 +1,4 @@
-# OdinEye P2B — Pixel Routing + Guessed Completion + Scale Token
+# OdinEye P1B — Pixel Routing + Guessed Completion + Scale Token
 
 The active implementation is a from-scratch replacement for the former P1B
 occupancy objective. Frozen VGGT aggregation runs exactly once per RGB window.
@@ -7,9 +7,9 @@ There is no learned Observed occupancy decoder.
 
 Two strict variants are supported:
 
-- `P2B-NLL`: Beta evidence, pixelwise Evidential NLL and annealed wrong-evidence
+- `P1B-NLL`: Beta evidence, pixelwise Evidential NLL and annealed wrong-evidence
   KL for guessed completion;
-- `P2B-BCE`: Bernoulli logits and pixelwise BCE, with classification certainty
+- `P1B-BCE`: Bernoulli logits and pixelwise BCE, with classification certainty
   but no claim of epistemic confidence.
 
 Both variants retain the same RGB-only runtime contract, 512x512/6.5 m single
@@ -50,18 +50,69 @@ uses coefficient `.005`, starts after 20%, and ramps during 20%-30%.
 The new training entrypoint is:
 
 ```bash
-python -m vggt_bev_method1.cli_train_p2b --config CONFIG.toml
+python -m vggt_bev_method1.cli_train_p1b --config CONFIG.toml
 ```
+
+### Current Merged routing training
+
+`configs/p1b_merged6p5_role_contour_2epoch.toml` reproduces the current
+Merged-only training path without embedding machine-specific paths. It freezes
+VGGT, Single, Scale and Guessed parameters and trains only the independent
+Merged routing projector/decoder for FOV Support and Observed Gate.
+
+The 6.5 m Merged target is a metric centre crop of the existing 10 m Merged
+raster, never a resize. Both latent and output grids are native 512x512. FOV
+Support uses independently normalized interior/edge BCE plus contour and
+region Dice weights `0.25/0.45/0.20/0.10`; Observed Gate uses
+`0.20/0.50/0.20/0.10`. The first 20% of the two-epoch schedule trains FOV
+Support only, after which both routing outputs train together.
+
+Execution-only acceleration uses bounded 65,536-query deformable-attention
+chunks, head-only `torch.compile`, fused AdamW and activation checkpointing.
+These settings do not change model parameters or the loss contract.
 
 Checkpoint schemas are intentionally incompatible:
 
 ```text
-P2B-NLL: p2b-three-region-evidential-v5
-P2B-BCE: p2b-three-region-bce-v5
+P1B-NLL: p1b-three-region-evidential-v6
+P1B-BCE: p1b-three-region-bce-v6
 ```
 
+## Standalone GT Void audit
+
+P1B training has been rewound to the Stage-1 baseline supervision contract.
+Scene-geometry Void masks are not dataset fields, model inputs, loss masks,
+metric masks, checkpoint fields, or output classes. Every semantic/FOV pixel is
+handled exactly as it was by the 36K Surface-NLL baseline.
+
+Missing-scene review now lives in the independent `p1b_void_audit` package.
+It reads the immutable geometry coverage sidecars and existing GT rasters, but
+P1B never imports it. The audit is read-only and writes:
+
+- `void_fraction_per_gt_bev.csv`: one row per corresponding Single/Merged,
+  Complete/Observed GT BEV;
+- `void_fraction_summary.json`: aggregate statistics for each GT type;
+- `void_fraction_of_grid`: Void pixels divided by all BEV pixels;
+- `void_fraction_of_gt_known`: Void pixels intersecting known semantic GT,
+  divided by known semantic pixels.
+
+Run it independently with:
+
+```bash
+odineye-p1b-void-audit \
+  --dataset-root DATASET \
+  --manifest MANIFEST.json \
+  --void-index COVERAGE_INDEX.json \
+  --output-dir AUDIT_OUTPUT
+```
+
+The default audits the final prefix used by one-prefix-per-session training.
+Use `--frame-mode all` to report every frame up to the ten-frame window.
+
 Legacy P1B modules remain in the repository only for historical comparison and
-old checkpoint inspection. They are not called by `cli_train_p2b`.
+old checkpoint inspection. They are not called by `cli_train_p1b`.
+Pre-rename `P2B-*` configs are quarantined under `configs/legacy_p2b/`; they
+are historical records, not valid active launch configurations.
 
 ## Legacy P1B reference
 
@@ -93,6 +144,12 @@ in this version.
 The only external runtime input is an RGB window. `Method1System.forward()`
 runs the frozen aggregator and the P1B head; it does not run or consume VGGT
 depth, intrinsics, extrinsics, confidence, or a point cloud.
+
+The optional interactive verifier is the sole exception at the serving layer:
+it decodes the frozen VGGT camera head after shared aggregation so that the
+closed-loop controller can estimate inter-frame motion. It still takes RGB
+only, does not execute the depth head, and does not feed camera poses into the
+P1B BEV predictor.
 
 The output is:
 
@@ -138,6 +195,28 @@ The forward-only `[0,6.5] m` layout in the design note was an example. This
 implementation deliberately preserves the dataset's centred grid so the GT,
 training, validation, runtime, and planner conventions remain identical
 without recollecting data.
+
+## Interactive A* verifier
+
+Start the local Habitat verifier with:
+
+```bash
+./run_interactive_verifier.sh
+```
+
+Click a GT-free target on Complete GT and select one of two modes:
+
+- **Open loop:** run exact-grid A* once on the synchronized predicted BEV,
+  then execute those metric waypoints without replanning.
+- **Closed loop:** on every predicted-BEV update, obtain the relative camera
+  transform from VGGT world-to-camera extrinsics, multiply only its
+  translation by the Scale Token λ, express the fixed target in the new ego
+  frame, and rerun exact-grid A*.
+
+Both modes plan on the native 512×512, 6.5 m semantic raster with zero
+inflation. Occupied and unknown cells are blocked. A closed-loop missing pose,
+broken history chain, newly blocked target, or disconnected route is surfaced
+as an explicit failure and stops execution.
 
 ## Training targets and teacher path
 
@@ -286,11 +365,13 @@ cannot be resumed. Start a fresh run for this loss revision.
 
 ```bash
 python -m pip install --no-deps -e .
-odineye-p1b-freeze-split --config configs/p1b_local_smoke.toml
-odineye-p1b-train --config configs/p1b_local_smoke.toml --data-only
-odineye-p1b-train --config configs/p1b_local_smoke.toml \
+odineye-p1b-freeze-split --config configs/p1b_nll_local_smoke.toml
+odineye-p1b-train --config configs/p1b_nll_local_smoke.toml --data-only
+odineye-p1b-train --config configs/p1b_nll_local_smoke.toml \
   --smoke-first-sample --max-train-steps 1 --skip-validation
 ```
 
-Remote configs are `p1b_remote_gpu_a.toml` and `p1b_remote_gpu.toml`.
-`remote_gpu` training must use Slurm.
+These former-architecture configs and launchers are retained only under
+`configs/legacy_p1b_previous_architecture/` and
+`scripts/legacy_p1b_previous_architecture/`. They are not valid inputs to the
+current `cli_train_p1b` entrypoint.

@@ -104,6 +104,30 @@ def render_semantic(branch: dict[str, torch.Tensor], threshold: float) -> np.nda
     return result
 
 
+def decode_vggt_camera_extrinsics(
+    system: Method1System,
+    extraction: dict,
+    images: torch.Tensor,
+) -> torch.Tensor:
+    """Decode VGGT world-to-camera poses without executing its depth head."""
+
+    with torch.no_grad(), torch.autocast(
+        device_type=images.device.type,
+        dtype=torch.bfloat16,
+        enabled=images.device.type == "cuda",
+    ):
+        pose_encoding = system.adapter.backbone.camera_head(
+            extraction["_aggregated"],
+            patch_token_start=extraction["_patch_start"],
+        )
+    from vggt_omega.utils.pose_enc import encoding_to_camera
+
+    camera_from_world, _ = encoding_to_camera(
+        pose_encoding.float(), images.shape[-2:]
+    )
+    return camera_from_world
+
+
 def render_confidence(branch: dict[str, torch.Tensor], threshold: float) -> np.ndarray:
     probability = branch["occupancy_probability"][0].detach().cpu().numpy()
     classes = (probability >= threshold).astype(np.int64)
@@ -151,6 +175,7 @@ class Runtime:
         self.max_history = int(args.max_history)
         self.segment_id = ""
         self.frames: list[torch.Tensor] = []
+        self.frame_seqs: list[int] = []
         self.lock = threading.Lock()
 
     def health(self) -> dict:
@@ -175,7 +200,14 @@ class Runtime:
                 "extrinsics": False,
                 "depth": False,
                 "ground_truth": False,
-                "vggt_geometry_heads_executed": False,
+                "vggt_geometry_heads_executed": True,
+                "vggt_camera_head_executed": True,
+                "vggt_depth_head_executed": False,
+            },
+            "runtime_output_contract": {
+                "predicted_extrinsics": "VGGT world-to-camera 3x4",
+                "predicted_extrinsic_units": "VGGT native translation units",
+                "depth": False,
             },
         }
 
@@ -183,6 +215,7 @@ class Runtime:
         with self.lock:
             self.segment_id = segment_id
             self.frames.clear()
+            self.frame_seqs.clear()
         return {"accepted": True, "segment_id": segment_id}
 
     def predict(self, payload: dict) -> dict:
@@ -198,9 +231,12 @@ class Runtime:
             if segment_id != self.segment_id:
                 self.segment_id = segment_id
                 self.frames.clear()
+                self.frame_seqs.clear()
             self.frames.append(tensor)
             if len(self.frames) > self.max_history:
                 self.frames = self.frames[-self.max_history :]
+            self.frame_seqs.append(int(payload["frame_seq"]))
+            self.frame_seqs = self.frame_seqs[-self.max_history :]
             images = torch.stack(self.frames)[None].to(
                 self.device,
                 non_blocking=True,
@@ -217,20 +253,25 @@ class Runtime:
                     enabled_bev_branches=("single",),
                     include_scale=True,
                 )
+            single = prediction["single_bev"]
+            scale = prediction["scale"]
+            camera_from_world_vggt = decode_vggt_camera_extrinsics(
+                self.system, extraction, images
+            )
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
             elapsed = time.monotonic() - started
-            single = prediction["single_bev"]
-            scale = prediction["scale"]
             health = self.health()
+            semantic_png = encode_png_base64(
+                render_semantic(single, threshold)
+            )
             return {
                 **health,
                 "history_frame_count": len(self.frames),
                 "frame_seq": int(payload["frame_seq"]),
                 "inference_seconds": elapsed,
-                "model_single_png_base64": encode_png_base64(
-                    render_semantic(single, threshold)
-                ),
+                "model_single_png_base64": semantic_png,
+                "model_single_semantic_png_base64": semantic_png,
                 "confidence_single_png_base64": encode_png_base64(
                     render_confidence(single, threshold)
                 ),
@@ -245,6 +286,10 @@ class Runtime:
                     )[0].detach().cpu()
                 ),
                 "shared_vggt_extraction": True,
+                "vggt_pose_frame_seqs": list(self.frame_seqs),
+                "vggt_predicted_camera_from_world": (
+                    camera_from_world_vggt[0].detach().float().cpu().tolist()
+                ),
             }
 
 

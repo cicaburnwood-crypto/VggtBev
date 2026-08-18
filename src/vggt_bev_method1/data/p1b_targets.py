@@ -6,6 +6,8 @@ import torch
 
 from vggt_bev_method1.config import LabelValues
 
+DEFAULT_LABEL_VALUES = LabelValues()
+
 ROUTING_OBSERVED_FREE = 0
 ROUTING_GUESSED_FREE = 1
 ROUTING_GUESSED_OCCUPIED = 2
@@ -18,7 +20,7 @@ ROUTING_CLASS_NAMES = (
 
 
 @dataclass(frozen=True)
-class P2BRegionMasks:
+class P1BRegionMasks:
     valid: torch.Tensor
     observed_free: torch.Tensor
     visible_surface: torch.Tensor
@@ -32,13 +34,13 @@ class P2BRegionMasks:
     routing_target: torch.Tensor
 
 
-def p2b_region_masks(
+def p1b_region_masks(
     complete: torch.Tensor,
     visible: torch.Tensor,
     support: torch.Tensor,
     *,
-    labels: LabelValues = LabelValues(),
-) -> P2BRegionMasks:
+    labels: LabelValues = DEFAULT_LABEL_VALUES,
+) -> P1BRegionMasks:
     """Create exact per-pixel routing labels from existing BEV targets.
 
     No ray, contour, dilation or morphology operation is used. The masked
@@ -53,7 +55,7 @@ def p2b_region_masks(
         raise ValueError("complete, visible and support targets must align")
     valid = complete != labels.unknown
     if not torch.equal(valid, support.bool()):
-        raise ValueError("P2B support must equal the valid complete target")
+        raise ValueError("P1B support must equal the valid complete target")
     visible_known = (visible != labels.unknown) & valid
     if bool((visible_known & (visible != complete)).any()):
         raise ValueError("visible target disagrees with complete target")
@@ -70,13 +72,13 @@ def p2b_region_masks(
         observed_free | visible_surface | hidden_guessed,
         valid,
     ):
-        raise ValueError("P2B direct/hidden loss subsets must partition support")
+        raise ValueError("P1B direct/hidden loss subsets must partition support")
     if bool(
         (observed_free & visible_surface).any()
         or (observed_free & hidden_guessed).any()
         or (visible_surface & hidden_guessed).any()
     ):
-        raise ValueError("P2B direct/hidden loss subsets overlap")
+        raise ValueError("P1B direct/hidden loss subsets overlap")
 
     routing_target = torch.full_like(
         complete,
@@ -86,7 +88,7 @@ def p2b_region_masks(
     routing_target[observed_free] = ROUTING_OBSERVED_FREE
     routing_target[guessed_free] = ROUTING_GUESSED_FREE
     routing_target[guessed_occupied] = ROUTING_GUESSED_OCCUPIED
-    return P2BRegionMasks(
+    return P1BRegionMasks(
         valid=valid,
         observed_free=observed_free,
         visible_surface=visible_surface,

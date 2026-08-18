@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""RGB-only HTTP runtime for the P2B-NLL interactive visualizer.
+"""RGB-only HTTP runtime for the P1B-NLL interactive visualizer.
 
 This server runs the frozen VGGT aggregator once per submitted RGB window and
-then executes the trained P2B single-BEV, gate and scale branches.  It never
+then executes the trained P1B single-BEV, gate and scale branches.  It never
 accepts simulator geometry, BEV targets, camera parameters, depth or poses.
 """
 
@@ -29,10 +29,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from vggt_bev_method1.data.preprocess import RGBResizePad
-from vggt_bev_method1.models import LiveVGGTOmegaAdapter, P2BSystem
+from vggt_bev_method1.models import LiveVGGTOmegaAdapter, P1BSystem
 
 
-SCHEMA = "p2b-three-region-evidential-v5"
+SCHEMA = "p1b-three-region-evidential-v6"
+LEGACY_SCHEMAS: set[str] = set()
 FREE_COLOR = np.asarray((73, 206, 122), dtype=np.float32)
 OCCUPIED_COLOR = np.asarray((242, 78, 78), dtype=np.float32)
 UNKNOWN_COLOR = np.asarray((128, 128, 128), dtype=np.uint8)
@@ -61,15 +62,16 @@ def build_system(
     backbone_source: Path,
     backbone_checkpoint: Path,
     device: torch.device,
-) -> P2BSystem:
-    if state.get("checkpoint_schema") != SCHEMA:
+) -> P1BSystem:
+    if state.get("checkpoint_schema") not in {SCHEMA, *LEGACY_SCHEMAS}:
         raise ValueError(
-            f"expected {SCHEMA}, got {state.get('checkpoint_schema')}"
+            f"expected {SCHEMA} or a declared legacy alias, "
+            f"got {state.get('checkpoint_schema')}"
         )
     values = state["config"]["model"]
     layers = tuple(int(value) for value in values["cached_layers"])
     # Keep unused frozen camera/depth heads and the disabled merged decoder on
-    # CPU.  The executed computation remains precisely the P2B runtime graph.
+    # CPU.  The executed computation remains precisely the Single-BEV graph.
     adapter = LiveVGGTOmegaAdapter(
         backbone_source,
         backbone_checkpoint,
@@ -77,7 +79,7 @@ def build_system(
         patch_size=int(values["patch_size"]),
         cached_layers=layers,
     )
-    system = P2BSystem(
+    system = P1BSystem(
         adapter,
         probability_model=str(values["probability_model"]),
         cached_layers=layers,
@@ -106,15 +108,16 @@ def build_system(
         else torch.float16
     )
     system.adapter.backbone.aggregator.to(device=device, dtype=dtype)
+    system.adapter.backbone.camera_head.to(device=device, dtype=dtype)
     head = system.unwrapped_head()
     for module in (
-        head.guessed_token_projector,
-        head.routing_token_projector,
+        head.single_guessed_token_projector,
+        head.single_routing_token_projector,
         head.scale_token_projector,
         head.single_bev_decoder,
         head.scale_decoder,
     ):
-        module.to(device)
+        module.to(device=device, dtype=dtype)
     return system.eval()
 
 
@@ -132,6 +135,30 @@ def render_semantic(branch: dict, threshold: float) -> np.ndarray:
     semantic[inside & (occupied < threshold)] = 255
     semantic[inside & (occupied >= threshold)] = 0
     return semantic
+
+
+def decode_vggt_camera_extrinsics(
+    system: P1BSystem,
+    extraction: dict,
+    images: torch.Tensor,
+) -> torch.Tensor:
+    """Decode VGGT world-to-camera poses without executing its depth head."""
+
+    with torch.no_grad(), torch.autocast(
+        device_type=images.device.type,
+        dtype=torch.bfloat16,
+        enabled=images.device.type == "cuda",
+    ):
+        pose_encoding = system.adapter.backbone.camera_head(
+            extraction["_aggregated"],
+            patch_token_start=extraction["_patch_start"],
+        )
+    from vggt_omega.utils.pose_enc import encoding_to_camera
+
+    camera_from_world, _ = encoding_to_camera(
+        pose_encoding.float(), images.shape[-2:]
+    )
+    return camera_from_world
 
 
 def render_confidence(branch: dict, threshold: float) -> np.ndarray:
@@ -309,6 +336,7 @@ class Runtime:
             raise ValueError("max history must be in [1, 10]")
         self.segment_id = ""
         self.frames: list[torch.Tensor] = []
+        self.frame_seqs: list[int] = []
         self.lock = threading.Lock()
 
     def health(self) -> dict:
@@ -316,7 +344,7 @@ class Runtime:
         head = self.system.unwrapped_head()
         return {
             "ready": True,
-            "model": "P2B-NLL",
+            "model": "P1B-NLL",
             "single_extent_m": float(model["single_bev_extent_m"]),
             "single_output_size": int(head.single_bev_decoder.output_size),
             "single_latent_size": int(head.single_bev_decoder.guessed.latent_size),
@@ -331,15 +359,23 @@ class Runtime:
                 "extrinsics": False,
                 "depth": False,
                 "ground_truth": False,
-                "vggt_geometry_heads_executed": False,
+                "vggt_geometry_heads_executed": True,
+                "vggt_camera_head_executed": True,
+                "vggt_depth_head_executed": False,
             },
             "shared_vggt_backbone": True,
+            "runtime_output_contract": {
+                "predicted_extrinsics": "VGGT world-to-camera 3x4",
+                "predicted_extrinsic_units": "VGGT native translation units",
+                "depth": False,
+            },
         }
 
     def reset(self, segment_id: str) -> dict:
         with self.lock:
             self.segment_id = segment_id
             self.frames.clear()
+            self.frame_seqs.clear()
         return {"accepted": True, "segment_id": segment_id}
 
     def predict(self, payload: dict) -> dict:
@@ -355,8 +391,11 @@ class Runtime:
             if segment_id != self.segment_id:
                 self.segment_id = segment_id
                 self.frames.clear()
+                self.frame_seqs.clear()
             self.frames.append(tensor)
             self.frames = self.frames[-self.max_history :]
+            self.frame_seqs.append(int(payload["frame_seq"]))
+            self.frame_seqs = self.frame_seqs[-self.max_history :]
             images = torch.stack(self.frames)[None].to(self.device, non_blocking=True)
             started = time.monotonic()
             with torch.inference_mode(), torch.autocast(
@@ -368,11 +407,16 @@ class Runtime:
                 prediction = self.system.forward_head(
                     extraction, enabled_bev_branches=("single",), include_scale=True
                 )
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
             branch = prediction["single_bev"]
             scale = prediction["scale"]
+            camera_from_world_vggt = decode_vggt_camera_extrinsics(
+                self.system, extraction, images
+            )
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            elapsed = time.monotonic() - started
             gate_contour = predicted_gate_contour(branch)
+            raw_semantic_png = _encode_png(render_semantic(branch, threshold))
             semantic_png = _encode_png(
                 overlay_gate_contour(
                     render_semantic(branch, threshold), gate_contour
@@ -392,9 +436,13 @@ class Runtime:
                 **self.health(),
                 "history_frame_count": len(self.frames),
                 "frame_seq": int(payload["frame_seq"]),
-                "inference_seconds": time.monotonic() - started,
+                "inference_seconds": elapsed,
                 "model_single_png_base64": semantic_png,
-                "confidence_single_png_base64": _encode_png(render_confidence(branch, threshold)),
+                # Verifier/planner input without the red display-only Gate line.
+                "model_single_semantic_png_base64": raw_semantic_png,
+                "confidence_single_png_base64": _encode_png(
+                    render_confidence(branch, threshold)
+                ),
                 "observed_gate_single_png_base64": _encode_png(
                     render_observed_gate(branch)
                 ),
@@ -409,12 +457,16 @@ class Runtime:
                     scale["scale_std_m_per_vggt"][0].detach().cpu()
                 ),
                 "shared_vggt_extraction": True,
+                "vggt_pose_frame_seqs": list(self.frame_seqs),
+                "vggt_predicted_camera_from_world": (
+                    camera_from_world_vggt[0].detach().float().cpu().tolist()
+                ),
             }
 
 
 def make_handler(runtime: Runtime) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "P2BRuntime/1.0"
+        server_version = "P1BRuntime/1.0"
 
         def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
             data = json.dumps(payload).encode("utf-8")
@@ -462,7 +514,7 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), make_handler(runtime))
     server.daemon_threads = True
     print(json.dumps(runtime.health(), indent=2), flush=True)
-    print(f"P2B runtime ready: http://{args.host}:{args.port}", flush=True)
+    print(f"P1B runtime ready: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:

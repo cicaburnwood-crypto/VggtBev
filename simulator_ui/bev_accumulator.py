@@ -46,6 +46,12 @@ class BEVAccumulator:
         self.complete = np.full((1, 1), UNKNOWN_VALUE, dtype=np.uint8)
         self.complete_known = np.zeros((1, 1), dtype=bool)
         self.observed = np.zeros((1, 1), dtype=bool)
+        # Kept separately for the routing-geometry visualizer.  ``complete``
+        # is the revealed label inside the geometric FOV union, while
+        # ``visible`` is the genuinely line-of-sight masked label used to
+        # supervise the Observed Gate.
+        self.visible = np.full((1, 1), UNKNOWN_VALUE, dtype=np.uint8)
+        self.visible_known = np.zeros((1, 1), dtype=bool)
         self.all_crop_corners: list[np.ndarray] = []
 
     def _expand(self, corners: np.ndarray) -> None:
@@ -63,6 +69,8 @@ class BEVAccumulator:
             self.complete = np.full(shape, UNKNOWN_VALUE, dtype=np.uint8)
             self.complete_known = np.zeros(shape, dtype=bool)
             self.observed = np.zeros(shape, dtype=bool)
+            self.visible = np.full(shape, UNKNOWN_VALUE, dtype=np.uint8)
+            self.visible_known = np.zeros(shape, dtype=bool)
             return
 
         old_min_x = self.minimum_x
@@ -92,6 +100,8 @@ class BEVAccumulator:
             ("complete", UNKNOWN_VALUE),
             ("complete_known", False),
             ("observed", False),
+            ("visible", UNKNOWN_VALUE),
+            ("visible_known", False),
         ):
             old = getattr(self, name)
             expanded = np.full((new_rows, new_columns), fill, dtype=old.dtype)
@@ -174,6 +184,148 @@ class BEVAccumulator:
         self.complete_known |= complete_mask
 
         self.observed |= complete_mask
+
+    def update_routing_geometry(
+        self,
+        complete: np.ndarray,
+        fov_complete: np.ndarray,
+        visible: np.ndarray,
+        extrinsic: dict[str, Any],
+    ) -> None:
+        """Accumulate the two exact GT domains used by Policy A training.
+
+        ``fov_complete != unknown`` defines unobstructed camera-FOV support.
+        ``visible != unknown`` defines actual line-of-sight observation.  The
+        two domains must remain separate: using the latter as support would
+        incorrectly turn all occluded cells into outside-FOV cells.
+        """
+
+        expected = (self.size, self.size)
+        if any(array.shape != expected for array in (complete, fov_complete, visible)):
+            raise ValueError("routing-geometry BEV inputs must match accumulator size")
+        position = extrinsic["agent_position_world_m"]
+        forward = extrinsic["bev_forward_xz"]
+        right = extrinsic["bev_right_xz"]
+        corners = crop_corners(position, forward, right, self.extent)
+        self._expand(corners)
+        self.all_crop_corners.append(corners)
+        matrix, offset = self._ego_to_world_transform(position, forward, right)
+        output_shape = self.complete.shape
+
+        complete_warped = ndimage.affine_transform(
+            complete,
+            matrix,
+            offset,
+            output_shape=output_shape,
+            output=np.uint8,
+            order=0,
+            mode="constant",
+            cval=int(UNKNOWN_VALUE),
+            prefilter=False,
+        )
+        support_warped = ndimage.affine_transform(
+            (fov_complete != UNKNOWN_VALUE).astype(np.uint8),
+            matrix,
+            offset,
+            output_shape=output_shape,
+            output=np.uint8,
+            order=0,
+            mode="constant",
+            cval=0,
+            prefilter=False,
+        ).astype(bool)
+        self.complete[support_warped] = complete_warped[support_warped]
+        self.complete_known |= support_warped
+
+        visible_warped = ndimage.affine_transform(
+            visible,
+            matrix,
+            offset,
+            output_shape=output_shape,
+            output=np.uint8,
+            order=0,
+            mode="constant",
+            cval=int(UNKNOWN_VALUE),
+            prefilter=False,
+        )
+        visible_mask = visible_warped != UNKNOWN_VALUE
+        # Chronological iteration gives latest-frame overwrite, matching the
+        # collector's merged target contract.
+        self.visible[visible_mask] = visible_warped[visible_mask]
+        self.visible_known |= visible_mask
+
+    def render_routing_geometry(
+        self,
+        extrinsic: dict[str, Any],
+        merged_extent: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Render merged FOV-complete and directly-visible GT in latest ego."""
+
+        if not self.all_crop_corners:
+            raise RuntimeError("cannot render an empty accumulator")
+        if self.minimum_x is None or self.maximum_z is None:
+            raise RuntimeError("accumulator bounds are unavailable")
+        position = extrinsic["agent_position_world_m"]
+        forward = np.asarray(extrinsic["bev_forward_xz"], dtype=np.float64)
+        right = np.asarray(extrinsic["bev_right_xz"], dtype=np.float64)
+        output_mpp = merged_extent / self.size
+        center = (self.size - 1) / 2.0
+        scale = output_mpp / self.meters_per_pixel
+        matrix = np.asarray(
+            [
+                [forward[1] * scale, -right[1] * scale],
+                [-forward[0] * scale, right[0] * scale],
+            ],
+            dtype=np.float64,
+        )
+        offset = np.asarray(
+            [
+                (
+                    self.maximum_z
+                    - position[2]
+                    - center * output_mpp * (forward[1] - right[1])
+                )
+                / self.meters_per_pixel,
+                (
+                    position[0]
+                    - self.minimum_x
+                    + center * output_mpp * (forward[0] - right[0])
+                )
+                / self.meters_per_pixel,
+            ],
+            dtype=np.float64,
+        )
+
+        def render(values: np.ndarray, known: np.ndarray) -> np.ndarray:
+            result = ndimage.affine_transform(
+                values,
+                matrix,
+                offset,
+                output_shape=(self.size, self.size),
+                output=np.uint8,
+                order=0,
+                mode="constant",
+                cval=int(UNKNOWN_VALUE),
+                prefilter=False,
+            )
+            rendered_known = ndimage.affine_transform(
+                known.astype(np.uint8),
+                matrix,
+                offset,
+                output_shape=(self.size, self.size),
+                output=np.uint8,
+                order=0,
+                mode="constant",
+                cval=0,
+                prefilter=False,
+            ).astype(bool)
+            result[~rendered_known] = UNKNOWN_VALUE
+            return result
+
+        return (
+            render(self.complete, self.complete_known),
+            render(self.visible, self.visible_known & self.complete_known),
+        )
 
     def render_masked(
         self,

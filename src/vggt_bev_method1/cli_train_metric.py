@@ -132,31 +132,31 @@ def _configure_head_compilation(
         import torch._functorch.config as functorch_config
 
         functorch_config.donated_buffer = False
-        # Compiling the complete native-resolution head unrolls hundreds of
-        # Python query chunks into one impractically large graph. Compile the
-        # hot deformable-attention chunk kernels instead. They remain entirely
-        # inside the trainable P1B head; frozen VGGT, losses and PCGrad stay
-        # eager, and module/state_dict/DDP contracts remain unchanged.
+        # Compiling the complete native-resolution head unrolls the Python
+        # query loop into one impractically large graph. Compile bounded
+        # deformable chunks and dense self-attention/FFN kernels separately.
+        # These execution-only callables do not enter state_dicts.
         for module in model.head.modules():
-            configure = getattr(
-                module,
-                "configure_query_chunk_compilation",
-                None,
-            )
-            if configure is None:
-                continue
             parameters = getattr(module, "parameters", None)
             if parameters is not None and not any(
                 parameter.requires_grad
                 for parameter in parameters(recurse=True)
             ):
                 continue
-            configure(
-                backend=settings["backend"],
-                mode=settings["mode"],
-                dynamic=settings["dynamic"],
-            )
-            compiled_modules += 1
+            for method_name in (
+                "configure_query_chunk_compilation",
+                "configure_execution_compilation",
+            ):
+                configure = getattr(module, method_name, None)
+                if configure is None:
+                    continue
+                configured = configure(
+                    backend=settings["backend"],
+                    mode=settings["mode"],
+                    dynamic=settings["dynamic"],
+                )
+                if configured is not False:
+                    compiled_modules += 1
         if compiled_modules == 0:
             raise RuntimeError(
                 "head compile requested but no deformable query chunks exist"

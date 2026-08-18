@@ -42,8 +42,15 @@ def build_datasets(
             if data.get("maximum_sessions") is not None
             else None
         ),
-        verify_metadata=verify_manifest,
-        verify_artifacts=verify_manifest,
+        selection_order=data.get("session_selection_order"),
+        verify_metadata=(
+            verify_manifest
+            and bool(data.get("verify_manifest_metadata_at_startup", True))
+        ),
+        verify_artifacts=(
+            verify_manifest
+            and bool(data.get("verify_manifest_artifacts_at_startup", True))
+        ),
     )
     train_keys, validation_keys = manifest_session_keys(manifest)
     preprocess = RGBResizePad(
@@ -57,6 +64,15 @@ def build_datasets(
         "sample_stride": int(data["sample_stride"]),
         "minimum_history": int(data["minimum_history"]),
         "maximum_history": int(data["maximum_history"]),
+        "void_coverage_index": data.get("void_coverage_index"),
+        "expected_manifest_sha256": manifest["content_sha256"],
+        "single_bev_extent_m": float(data["single_bev_extent_m"]),
+        "single_bev_output_size": int(data["single_bev_output_size"]),
+        "merged_source_extent_m": float(
+            data.get("merged_source_extent_m", 10.0)
+        ),
+        "merged_bev_extent_m": float(data["merged_bev_extent_m"]),
+        "merged_bev_output_size": int(data["merged_bev_output_size"]),
     }
     train = VGGNAVMethod1Dataset(session_keys=train_keys, **common)
     validation = VGGNAVMethod1Dataset(session_keys=validation_keys, **common)

@@ -26,10 +26,10 @@ ui_port="${VIDEO_UI_PORT:-8897}"
 model_port="${VIDEO_MODEL_PORT:-8898}"
 gpu_index="${GPU_INDEX:-0}"
 python="$bundle_root/runtime/ml-gpu/bin/python"
-runtime_checkpoint="$bundle_root/checkpoints/p2b_nll_v5_step14320.pt"
+runtime_checkpoint="$bundle_root/checkpoints/p1b_stage1_36k_surface_nll_epoch10_step14320.pt"
 backbone_checkpoint="$bundle_root/checkpoints/vggt_omega_1b_512_model.pt"
 backbone_source="$bundle_root/app/vendor/backbone"
-runtime_server="$bundle_root/app/simulator_ui/p2b_runtime_server.py"
+runtime_server="$bundle_root/app/simulator_ui/p1b_runtime_server_two_expert.py"
 video_server="$bundle_root/app/simulator_ui/video_visualizer.py"
 video_html="$bundle_root/app/simulator_ui/video_ui/index.html"
 data_dir="/media/user/T91/frodobots-mini-/data"
@@ -154,7 +154,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-echo "P2B video visualizer: http://127.0.0.1:$ui_port/"
+echo "P1B video visualizer: http://127.0.0.1:$ui_port/"
 if [[ "${NO_BROWSER:-0}" != "1" ]]; then
   xdg-open "http://127.0.0.1:$ui_port/" >/dev/null 2>&1 || true
 fi

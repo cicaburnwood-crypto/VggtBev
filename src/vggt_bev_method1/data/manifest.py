@@ -82,6 +82,7 @@ def create_split_manifest(
     seed: int,
     maximum_sessions: int | None = None,
     source_writer_count: int = 0,
+    selection_order: str = "lexicographic_session_key",
 ) -> dict:
     """Freeze one exact dataset snapshot for new P1B."""
 
@@ -94,10 +95,28 @@ def create_split_manifest(
             validation_fraction=validation_fraction,
             seed=seed,
             maximum_sessions=maximum_sessions,
+            selection_order=selection_order,
             verify_metadata=True,
         )
 
-    records = sorted(load_session_records(root), key=lambda record: record.key)
+    if selection_order == "lexicographic_session_key":
+        def order_key(record):
+            return record.key
+
+        selection_description = "lexicographic session key, first N before scene split"
+    elif selection_order == "completion_time":
+        def order_key(record):
+            return (
+                (record.path / "COMPLETE").stat().st_mtime_ns,
+                record.key,
+            )
+
+        selection_description = (
+            "COMPLETE marker mtime_ns then session key, first N before scene split"
+        )
+    else:
+        raise ValueError(f"unsupported session selection order: {selection_order}")
+    records = sorted(load_session_records(root), key=order_key)
     source_session_count = len(records)
     if maximum_sessions is not None:
         if maximum_sessions <= 0:
@@ -143,7 +162,8 @@ def create_split_manifest(
             if source_writer_count
             else "immutable_dataset"
         ),
-        "selection_order": "lexicographic session key, first N before scene split",
+        "selection_order": selection_order,
+        "selection_order_description": selection_description,
         "validation_fraction": validation_fraction,
         "split_seed": seed,
         "session_count": len(records),
@@ -167,6 +187,7 @@ def create_split_manifest(
             validation_fraction=validation_fraction,
             seed=seed,
             maximum_sessions=maximum_sessions,
+            selection_order=selection_order,
             verify_metadata=True,
         )
     temporary.unlink()
@@ -180,6 +201,7 @@ def load_split_manifest(
     validation_fraction: float,
     seed: int,
     maximum_sessions: int | None = None,
+    selection_order: str | None = None,
     verify_metadata: bool = True,
     verify_artifacts: bool = True,
 ) -> dict:
@@ -209,6 +231,10 @@ def load_split_manifest(
     if payload.get("maximum_sessions") != maximum_sessions:
         raise ValueError(
             "split manifest maximum_sessions does not match the configuration"
+        )
+    if selection_order is not None and payload.get("selection_order") != selection_order:
+        raise ValueError(
+            "split manifest selection order does not match the configuration"
         )
     if maximum_sessions is not None and int(payload["session_count"]) != maximum_sessions:
         raise ValueError(
