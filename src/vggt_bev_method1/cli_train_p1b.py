@@ -29,9 +29,14 @@ from vggt_bev_method1.data.void_coverage import FINAL_GT_VOID_FILTER
 from vggt_bev_method1.models import (
     LiveVGGTOmegaAdapter,
     P1BSystem,
+    P1CSystem,
     branch_specific_projector_state_dict,
     metric_scale_losses,
     metric_scale_metrics,
+)
+from vggt_bev_method1.p1c_losses import (
+    relative_se2_metric_totals,
+    relative_se2_pose_losses,
 )
 from vggt_bev_method1.p1b_config import load_p1b_config
 from vggt_bev_method1.p1b_losses import (
@@ -67,17 +72,27 @@ SCHEMAS = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train P1B Two-Experts BEV head")
+    parser = argparse.ArgumentParser(
+        description="Train P1B or geometry-aware P1C BEV heads"
+    )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data-only", action="store_true")
     parser.add_argument("--smoke-first-sample", action="store_true")
     parser.add_argument("--skip-validation", action="store_true")
     parser.add_argument("--max-train-steps", type=int)
     parser.add_argument("--resume", type=Path)
-    return parser.parse_args()
+    parser.add_argument(
+        "--eval-checkpoint",
+        type=Path,
+        help="Load a compatible head checkpoint, run validation, and exit.",
+    )
+    arguments = parser.parse_args()
+    if arguments.resume is not None and arguments.eval_checkpoint is not None:
+        parser.error("--resume and --eval-checkpoint are mutually exclusive")
+    return arguments
 
 
-def build_model(config: dict, device: torch.device) -> P1BSystem:
+def build_model(config: dict, device: torch.device) -> P1BSystem | P1CSystem:
     values = config["model"]
     layers = tuple(int(value) for value in values["cached_layers"])
     adapter = LiveVGGTOmegaAdapter(
@@ -87,7 +102,26 @@ def build_model(config: dict, device: torch.device) -> P1BSystem:
         patch_size=int(values["patch_size"]),
         cached_layers=layers,
     )
-    return P1BSystem(
+    system_class = (
+        P1CSystem
+        if values.get("pipeline_variant") == "P1C-NLL"
+        else P1BSystem
+    )
+    p1c_arguments = (
+        {
+            "pose_hidden_dim": int(values["pose_hidden_dim"]),
+            "pose_attention_heads": int(values["pose_attention_heads"]),
+            "pose_layers": int(values["pose_layers"]),
+            "pose_refinements": int(values["pose_refinements"]),
+            "maximum_history": int(values["maximum_history"]),
+            "pose_conditioning_detach": bool(
+                values.get("pose_conditioning_detach", False)
+            ),
+        }
+        if system_class is P1CSystem
+        else {}
+    )
+    return system_class(
         adapter,
         probability_model=str(values["probability_model"]),
         cached_layers=layers,
@@ -108,11 +142,12 @@ def build_model(config: dict, device: torch.device) -> P1BSystem:
         single_bev_extent_m=float(values["single_bev_extent_m"]),
         merged_bev_extent_m=float(values["merged_bev_extent_m"]),
         predict_scale_uncertainty=bool(values.get("predict_scale_uncertainty", True)),
+        **p1c_arguments,
     ).to(device)
 
 
 def _set_stage(
-    model: P1BSystem,
+    model: P1BSystem | P1CSystem,
     stage: str,
     enabled: tuple[str, ...],
     bev_objective: str = "full",
@@ -120,7 +155,16 @@ def _set_stage(
     head = model.unwrapped_head()
     for parameter in head.parameters():
         parameter.requires_grad = False
+    # ``hasattr`` is used instead of coupling the P1B training utilities to a
+    # concrete subclass through their public signatures.
+    is_p1c = hasattr(head, "relative_pose_head")
     if stage in ("bev_only", "joint"):
+        if bev_objective == "pose_only":
+            if not is_p1c or enabled != ("merged",):
+                raise ValueError("pose_only requires the P1C Merged branch")
+            for parameter in head.relative_pose_head.parameters():
+                parameter.requires_grad = True
+            return
         if bev_objective in (
             "fov_support_only",
             "fov_support_and_observed_gate",
@@ -133,6 +177,13 @@ def _set_stage(
             ):
                 for parameter in module.parameters():
                     parameter.requires_grad = True
+            if is_p1c:
+                for module in (
+                    head.relative_pose_head,
+                    head.merged_pose_embedding,
+                ):
+                    for parameter in module.parameters():
+                        parameter.requires_grad = True
             return
         modules = []
         for branch in enabled:
@@ -146,6 +197,13 @@ def _set_stage(
         for module in modules:
             for parameter in module.parameters():
                 parameter.requires_grad = True
+        if is_p1c and "merged" in enabled:
+            for module in (
+                head.relative_pose_head,
+                head.merged_pose_embedding,
+            ):
+                for parameter in module.parameters():
+                    parameter.requires_grad = True
     if stage in ("scale_only", "joint"):
         for module in (head.scale_token_projector, head.scale_decoder):
             for parameter in module.parameters():
@@ -439,7 +497,9 @@ def step_losses(
     branches = _enabled_bev_branches(training)
     probability_model = str(config["model"]["probability_model"])
     bev_objective = str(training.get("bev_objective", "full"))
-    if branches and f"{branches[0]}_bev" in prediction:
+    if "pose" in prediction:
+        zero = prediction["pose"]["relative_pose"].sum() * 0.0
+    elif branches and f"{branches[0]}_bev" in prediction:
         branch_prediction = prediction[f"{branches[0]}_bev"]
         zero_source = (
             branch_prediction["fov_support_logit"]
@@ -452,7 +512,9 @@ def step_losses(
     values: dict[str, torch.Tensor] = {}
     bev_total = zero
     if stage in ("bev_only", "joint"):
-        if bev_objective in (
+        if bev_objective == "pose_only":
+            values["bev_loss"] = zero
+        elif bev_objective in (
             "fov_support_only",
             "fov_support_and_observed_gate",
         ):
@@ -607,11 +669,31 @@ def step_losses(
         values.update({f"scale_{key}": value for key, value in scale.items()})
     else:
         scale = {"scale": zero, "depth_scale": zero, "uncertainty": zero}
+    if "pose" in prediction:
+        pose = relative_se2_pose_losses(
+            prediction["pose"],
+            batch["relative_pose_target"],
+            translation_weight=float(
+                training.get("pose_translation_weight", 1.0)
+            ),
+            yaw_weight=float(training.get("pose_yaw_weight", 0.5)),
+            refinement_gamma=float(
+                training.get("pose_refinement_gamma", 1.5)
+            ),
+            smooth_l1_beta_m=float(
+                training.get("pose_smooth_l1_beta_m", 0.10)
+            ),
+        )
+        values.update({f"pose_{key}": value for key, value in pose.items()})
+        pose_total = pose["loss"]
+    else:
+        pose_total = zero
     total = (
         float(training["bev_loss_weight"]) * bev_total
         + float(training["scale_loss_weight"]) * scale["scale"]
         + float(training["depth_scale_loss_weight"]) * scale["depth_scale"]
         + float(training.get("uncertainty_loss_weight", 0.0)) * scale["uncertainty"]
+        + float(training.get("pose_loss_weight", 0.0)) * pose_total
     )
     values["loss"] = total
     return total, values, scale_target
@@ -620,21 +702,34 @@ def step_losses(
 def checkpoint_contract(config: dict, manifest_sha256: str) -> dict:
     probability_model = str(config["model"]["probability_model"])
     bev_objective = str(config["training"].get("bev_objective", "full"))
+    is_p1c = config["training"]["pipeline"] == "P1C-NLL"
     support_variant = str(
         config["training"].get("support_loss_variant", "balanced_bce_dice")
     )
     contract = {
-        "format_version": FORMAT_VERSION + (1 if bev_objective != "full" else 0),
+        "format_version": (
+            FORMAT_VERSION + 2
+            if is_p1c
+            else FORMAT_VERSION + (1 if bev_objective != "full" else 0)
+        ),
         "checkpoint_schema": (
-            f"p1b-merged-routing-geometry-{support_variant}-v1"
-            if bev_objective != "full"
-            else SCHEMAS[probability_model]
+            f"p1c-relative-se2-{bev_objective}-{support_variant}-v1"
+            if is_p1c
+            else (
+                f"p1b-merged-routing-geometry-{support_variant}-v1"
+                if bev_objective != "full"
+                else SCHEMAS[probability_model]
+            )
         ),
         "pipeline_id": config["training"]["pipeline"],
         "probability_model": probability_model,
         "manifest_sha256": manifest_sha256,
         "runtime_inputs": ["rgb_window"],
-        "bev_architecture": "observed-free-gate-plus-guessed-binary-completion",
+        "bev_architecture": (
+            "pose-conditioned-observed-free-gate-plus-guessed-completion"
+            if is_p1c
+            else "observed-free-gate-plus-guessed-binary-completion"
+        ),
         "projector_layout": "branch-specific-single-merged-v1",
         "loss_contract": "legacy-balanced-gate-guessed-only-surface-v2",
         "gate_loss": "per-sample-1to1-observed-free-vs-all-guessed",
@@ -647,28 +742,73 @@ def checkpoint_contract(config: dict, manifest_sha256: str) -> dict:
             "guessed_occupied",
         ],
         "single_output": [512, 512, 6.5],
-        "merged_output": [800, 800, 10.0],
+        "merged_output": (
+            [
+                int(config["model"]["merged_bev_output_size"]),
+                int(config["model"]["merged_bev_output_size"]),
+                float(config["model"]["merged_bev_extent_m"]),
+            ]
+            if is_p1c
+            else [800, 800, 10.0]
+        ),
         "bev_objective": bev_objective,
     }
+    if is_p1c:
+        contract.update(
+            {
+                "geometry_conditioning": "relative_se2_embedding",
+                "pose_runtime_source": "frozen-vggt-camera-register-tokens",
+                "pose_training_target": "gt-metric-latest-from-frame-se2",
+                "pose_representation": ["tx_m", "tz_m", "sin_yaw", "cos_yaw"],
+                "pose_refinements": int(config["model"]["pose_refinements"]),
+                "runtime_inputs": ["rgb_window"],
+                "loss_contract": "metric-relative-se2-plus-p1b-routing-v1",
+            }
+        )
     if bev_objective != "full":
         contract.update(
             {
                 "trained_outputs": (
-                    ["merged_fov_support", "merged_observed_gate"]
-                    if bev_objective == "fov_support_and_observed_gate"
-                    else ["merged_fov_support"]
+                    ["relative_se2_pose"]
+                    if bev_objective == "pose_only"
+                    else (
+                        [
+                            "relative_se2_pose",
+                            "merged_fov_support",
+                            "merged_observed_gate",
+                        ]
+                        if is_p1c
+                        and bev_objective
+                        == "fov_support_and_observed_gate"
+                        else (
+                            ["merged_fov_support", "merged_observed_gate"]
+                            if bev_objective
+                            == "fov_support_and_observed_gate"
+                            else ["merged_fov_support"]
+                        )
+                    )
                 ),
                 "invalid_untrained_outputs": [
                     "merged_guessed_semantic",
                     "merged_confidence",
                     *(
-                        ["merged_observed_gate"]
-                        if bev_objective == "fov_support_only"
-                        else []
+                        ["merged_fov_support", "merged_observed_gate"]
+                        if bev_objective == "pose_only"
+                        else (
+                            ["merged_observed_gate"]
+                            if bev_objective == "fov_support_only"
+                            else []
+                        )
                     ),
                 ],
                 "trainable_scope": (
-                    "merged-routing-projector-and-routing-decoder-only"
+                    "relative-pose-head-only"
+                    if bev_objective == "pose_only"
+                    else (
+                        "relative-pose-plus-merged-routing"
+                        if is_p1c
+                        else "merged-routing-projector-and-routing-decoder-only"
+                    )
                 ),
                 "support_loss_variant": support_variant,
                 "routing_initialization": (
@@ -809,6 +949,22 @@ def load_checkpoint(
     )
 
 
+def load_head_checkpoint(
+    path: Path,
+    *,
+    model: P1BSystem,
+    contract: dict,
+) -> tuple[int, int]:
+    """Load a checkpoint for read-only evaluation without optimizer state."""
+
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    for key, expected in contract.items():
+        if state.get(key) != expected:
+            raise ValueError(f"checkpoint contract mismatch for {key}")
+    model.unwrapped_head().load_state_dict(state["head"], strict=True)
+    return int(state["epoch"]), int(state["global_step"])
+
+
 def _reduce_dict(values: dict[str, float], device: torch.device) -> dict[str, float]:
     if not dist.is_available() or not dist.is_initialized():
         return values
@@ -816,6 +972,42 @@ def _reduce_dict(values: dict[str, float], device: torch.device) -> dict[str, fl
     tensor = torch.tensor([values[key] for key in keys], device=device, dtype=torch.float64)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return dict(zip(keys, tensor.cpu().tolist(), strict=True))
+
+
+def _history_metric_keys(
+    branches: tuple[str, ...],
+    *,
+    maximum_history: int,
+    include_gate: bool,
+) -> dict[str, float]:
+    """Predeclare fixed DDP keys for history-conditioned binary metrics."""
+
+    output: dict[str, float] = {}
+    roles = ("support", "observed_gate") if include_gate else ("support",)
+    for branch in branches:
+        for history in range(1, maximum_history + 1):
+            prefix = f"{branch}_history_{history:02d}"
+            output[f"{prefix}_samples"] = 0.0
+            for role in roles:
+                for count in ("tp", "fp", "fn", "tn"):
+                    output[f"{prefix}_{role}_{count}"] = 0.0
+    return output
+
+
+def _binary_metric_summary(
+    values: dict[str, float],
+    prefix: str,
+) -> dict[str, float]:
+    tp = values.get(f"{prefix}_tp", 0.0)
+    fp = values.get(f"{prefix}_fp", 0.0)
+    fn = values.get(f"{prefix}_fn", 0.0)
+    tn = values.get(f"{prefix}_tn", 0.0)
+    return {
+        "precision": tp / max(tp + fp, 1.0),
+        "recall": tp / max(tp + fn, 1.0),
+        "iou": tp / max(tp + fp + fn, 1.0),
+        "accuracy": (tp + tn) / max(tp + fp + fn + tn, 1.0),
+    }
 
 
 @torch.no_grad()
@@ -833,6 +1025,33 @@ def validate(
     branches = _enabled_bev_branches(training)
     bev_objective = str(training.get("bev_objective", "full"))
     metric_totals: dict[str, float] = {}
+    maximum_history = int(config["data"]["maximum_history"])
+    if stage in ("bev_only", "joint") and bev_objective in (
+        "fov_support_only",
+        "fov_support_and_observed_gate",
+    ):
+        metric_totals.update(
+            _history_metric_keys(
+                branches,
+                maximum_history=maximum_history,
+                include_gate=(
+                    bev_objective == "fov_support_and_observed_gate"
+                ),
+            )
+        )
+    if config["training"]["pipeline"] == "P1C-NLL":
+        metric_totals.update(
+            {
+                "pose_translation_error_sum_m": 0.0,
+                "pose_yaw_error_sum_rad": 0.0,
+                "pose_pose_count": 0.0,
+            }
+        )
+        for history in range(1, maximum_history + 1):
+            prefix = f"pose_history_{history:02d}"
+            metric_totals[f"{prefix}_translation_error_sum_m"] = 0.0
+            metric_totals[f"{prefix}_yaw_error_sum_rad"] = 0.0
+            metric_totals[f"{prefix}_pose_count"] = 0.0
     scalar_totals: dict[str, float] = {}
     batches = 0
     cache_values = config.get("teacher_cache", {"mode": "live"})
@@ -873,7 +1092,30 @@ def validate(
         )
         for key, value in losses.items():
             scalar_totals[key] = scalar_totals.get(key, 0.0) + float(value.cpu())
-        if stage in ("bev_only", "joint"):
+        if "pose" in prediction:
+            pose_totals = relative_se2_metric_totals(
+                prediction["pose"]["relative_pose"],
+                batch["relative_pose_target"],
+            )
+            for key, value in pose_totals.items():
+                metric_totals[f"pose_{key}"] += float(value.cpu())
+            for sample_index, metadata in enumerate(batch["metadata"]):
+                history = int(metadata["history_frame_count"])
+                sample_totals = relative_se2_metric_totals(
+                    prediction["pose"]["relative_pose"][
+                        sample_index : sample_index + 1
+                    ],
+                    batch["relative_pose_target"][
+                        sample_index : sample_index + 1
+                    ],
+                )
+                prefix = f"pose_history_{history:02d}"
+                for key, value in sample_totals.items():
+                    metric_totals[f"{prefix}_{key}"] += float(value.cpu())
+        if (
+            stage in ("bev_only", "joint")
+            and bev_objective != "pose_only"
+        ):
             for branch in branches:
                 if bev_objective != "full":
                     probability = prediction[f"{branch}_bev"][
@@ -893,6 +1135,36 @@ def validate(
                         metric_totals[name] = metric_totals.get(name, 0.0) + float(
                             value.cpu()
                         )
+                    for sample_index, metadata in enumerate(batch["metadata"]):
+                        history = int(metadata["history_frame_count"])
+                        if not 1 <= history <= maximum_history:
+                            raise ValueError(
+                                f"history length {history} lies outside 1.."
+                                f"{maximum_history}"
+                            )
+                        prefix = f"{branch}_history_{history:02d}"
+                        sample_valid = valid[sample_index]
+                        sample_truth = truth[sample_index]
+                        sample_hard = hard[sample_index]
+                        history_counts = {
+                            "support_tp": (
+                                sample_hard & sample_truth & sample_valid
+                            ).sum(),
+                            "support_fp": (
+                                sample_hard & ~sample_truth & sample_valid
+                            ).sum(),
+                            "support_fn": (
+                                ~sample_hard & sample_truth & sample_valid
+                            ).sum(),
+                            "support_tn": (
+                                ~sample_hard & ~sample_truth & sample_valid
+                            ).sum(),
+                        }
+                        metric_totals[f"{prefix}_samples"] += 1.0
+                        for key, value in history_counts.items():
+                            metric_totals[f"{prefix}_{key}"] += float(
+                                value.cpu()
+                            )
                     if bev_objective == "fov_support_and_observed_gate":
                         masks = p1b_region_masks(
                             batch[f"{branch}_fov_complete_target"],
@@ -923,6 +1195,40 @@ def validate(
                             metric_totals[name] = metric_totals.get(
                                 name, 0.0
                             ) + float(value.cpu())
+                        for sample_index, metadata in enumerate(
+                            batch["metadata"]
+                        ):
+                            history = int(metadata["history_frame_count"])
+                            prefix = f"{branch}_history_{history:02d}"
+                            sample_truth = gate_truth[sample_index]
+                            sample_domain = gate_domain[sample_index]
+                            sample_hard = gate_hard[sample_index]
+                            history_counts = {
+                                "observed_gate_tp": (
+                                    sample_hard
+                                    & sample_truth
+                                    & sample_domain
+                                ).sum(),
+                                "observed_gate_fp": (
+                                    sample_hard
+                                    & ~sample_truth
+                                    & sample_domain
+                                ).sum(),
+                                "observed_gate_fn": (
+                                    ~sample_hard
+                                    & sample_truth
+                                    & sample_domain
+                                ).sum(),
+                                "observed_gate_tn": (
+                                    ~sample_hard
+                                    & ~sample_truth
+                                    & sample_domain
+                                ).sum(),
+                            }
+                            for key, value in history_counts.items():
+                                metric_totals[f"{prefix}_{key}"] += float(
+                                    value.cpu()
+                                )
                     continue
                 totals = p1b_metric_totals(
                     prediction[f"{branch}_bev"],
@@ -945,7 +1251,32 @@ def validate(
     reduced_scalars = _reduce_dict({**scalar_totals, "__batches": float(batches)}, device)
     count = max(reduced_scalars.pop("__batches", 0.0), 1.0)
     output = {key: value / count for key, value in reduced_scalars.items()}
-    if stage in ("bev_only", "joint"):
+    if config["training"]["pipeline"] == "P1C-NLL":
+        pose_count = reduced_metrics.get("pose_pose_count", 0.0)
+        output["pose_count"] = pose_count
+        output["pose_translation_mae_m"] = (
+            reduced_metrics.get("pose_translation_error_sum_m", 0.0)
+            / max(pose_count, 1.0)
+        )
+        output["pose_yaw_mae_rad"] = (
+            reduced_metrics.get("pose_yaw_error_sum_rad", 0.0)
+            / max(pose_count, 1.0)
+        )
+        for history in range(1, maximum_history + 1):
+            prefix = f"pose_history_{history:02d}"
+            history_count = reduced_metrics.get(f"{prefix}_pose_count", 0.0)
+            if history_count <= 0.0:
+                continue
+            output[f"{prefix}_pose_count"] = history_count
+            output[f"{prefix}_translation_mae_m"] = (
+                reduced_metrics[f"{prefix}_translation_error_sum_m"]
+                / history_count
+            )
+            output[f"{prefix}_yaw_mae_rad"] = (
+                reduced_metrics[f"{prefix}_yaw_error_sum_rad"]
+                / history_count
+            )
+    if stage in ("bev_only", "joint") and bev_objective != "pose_only":
         for branch in branches:
             prefix = f"{branch}_"
             raw = {
@@ -986,6 +1317,26 @@ def validate(
                             / max(gate_tp + gate_fp + gate_fn + gate_tn, 1.0),
                         }
                     )
+                for history in range(1, maximum_history + 1):
+                    history_prefix = f"history_{history:02d}"
+                    samples = raw.get(f"{history_prefix}_samples", 0.0)
+                    if samples <= 0.0:
+                        continue
+                    output[f"{branch}_{history_prefix}_samples"] = samples
+                    roles = ["support"]
+                    if bev_objective == "fov_support_and_observed_gate":
+                        roles.append("observed_gate")
+                    for role in roles:
+                        summary = _binary_metric_summary(
+                            raw,
+                            f"{history_prefix}_{role}",
+                        )
+                        output.update(
+                            {
+                                f"{branch}_{history_prefix}_{role}_{key}": value
+                                for key, value in summary.items()
+                            }
+                        )
             else:
                 output.update(
                     {
@@ -1073,8 +1424,14 @@ def main() -> None:
     ]
     if bev_objective != "full":
         allowed = (
-            "merged_routing_token_projector.",
-            "merged_bev_decoder.routing.",
+            ("relative_pose_head.",)
+            if bev_objective == "pose_only"
+            else (
+                "merged_routing_token_projector.",
+                "merged_bev_decoder.routing.",
+                "relative_pose_head.",
+                "merged_pose_embedding.",
+            )
         )
         unexpected = [name for name in trainable_names if not name.startswith(allowed)]
         if unexpected or not trainable_names:
@@ -1150,6 +1507,37 @@ def main() -> None:
             contract=contract,
         )
     checkpoint_hash = _checkpoint_sha256(config["model"]["checkpoint"])
+    if args.eval_checkpoint is not None:
+        checkpoint_epoch, checkpoint_step = load_head_checkpoint(
+            args.eval_checkpoint,
+            model=model,
+            contract=contract,
+        )
+        metrics = validate(
+            model,
+            validation_loader,
+            config=config,
+            device=device,
+            checkpoint_hash=checkpoint_hash,
+        )
+        if primary:
+            print(
+                json.dumps(
+                    {
+                        "evaluation_checkpoint": str(
+                            args.eval_checkpoint.expanduser().resolve()
+                        ),
+                        "checkpoint_epoch": checkpoint_epoch,
+                        "checkpoint_step": checkpoint_step,
+                        "validation": metrics,
+                    }
+                ),
+                flush=True,
+            )
+        if distributed:
+            dist.barrier()
+            dist.destroy_process_group()
+        return
     output_dir = Path(training["output_dir"]).expanduser().resolve()
     if primary:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1186,12 +1574,26 @@ def main() -> None:
                     "vggt_runs_per_batch": 1,
                     "bev_objective": bev_objective,
                     "trained_output": (
-                        "merged_fov_support+merged_observed_gate"
-                        if bev_objective == "fov_support_and_observed_gate"
+                        "relative_se2_pose"
+                        if bev_objective == "pose_only"
                         else (
-                            "merged_fov_support"
-                            if bev_objective == "fov_support_only"
-                            else "configured_full_bev"
+                            (
+                                "relative_se2_pose+merged_fov_support+"
+                                "merged_observed_gate"
+                            )
+                            if training["pipeline"] == "P1C-NLL"
+                            and bev_objective
+                            == "fov_support_and_observed_gate"
+                            else (
+                                "merged_fov_support+merged_observed_gate"
+                                if bev_objective
+                                == "fov_support_and_observed_gate"
+                                else (
+                                    "merged_fov_support"
+                                    if bev_objective == "fov_support_only"
+                                    else "configured_full_bev"
+                                )
+                            )
                         )
                     ),
                     "trainable_parameter_tensors": len(trainable_names),

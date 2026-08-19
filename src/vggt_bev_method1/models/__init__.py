@@ -23,6 +23,12 @@ from .p1b import (
     branch_specific_projector_state_dict,
 )
 from .p1b_probability import ProbabilityModel, fuse_pixel_routing
+from .p1c import (
+    P1CHead,
+    P1CSystem,
+    RelativeSE2PoseHead,
+    compose_se2_residual,
+)
 from .vggt_adapter import LiveVGGTOmegaAdapter
 
 __all__ = [
@@ -47,4 +53,8 @@ __all__ = [
     "PixelRoutedBEVDecoder",
     "branch_specific_projector_state_dict",
     "fuse_pixel_routing",
+    "P1CHead",
+    "P1CSystem",
+    "RelativeSE2PoseHead",
+    "compose_se2_residual",
 ]

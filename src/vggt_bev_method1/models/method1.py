@@ -68,6 +68,7 @@ class MultiScaleTokenProjector(nn.Module):
         self,
         tokens: dict[int, torch.Tensor],
         patch_grid: tuple[int, int],
+        frame_embedding: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         patch_height, patch_width = patch_grid
         output = []
@@ -76,6 +77,12 @@ class MultiScaleTokenProjector(nn.Module):
                 raise KeyError(f"missing cached VGGT layer {layer}")
             projected = self.projections[str(layer)](tokens[layer])
             batch, frames, patches, channels = projected.shape
+            if frame_embedding is not None:
+                if frame_embedding.shape != (batch, frames, channels):
+                    raise ValueError(
+                        "frame_embedding must have shape [B,N,hidden_dim]"
+                    )
+                projected = projected + frame_embedding[:, :, None, :]
             if patches != patch_height * patch_width:
                 raise ValueError(
                     f"layer {layer} has {patches} tokens but grid is "

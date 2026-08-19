@@ -19,6 +19,7 @@ def method1_collate(samples: list[dict]) -> dict:
         )
     tensor_keys = (
         "images",
+        "relative_pose_target",
         "scale_gt_depth_m",
         "scale_gt_valid_mask",
         "scale_gt_intrinsics",

@@ -7,6 +7,7 @@ from vggt_bev_method1.config import LabelValues
 from vggt_bev_method1.data import (
     cap_complete_and_visible_to_fov,
     fov_union_mask,
+    relative_planar_pose_targets,
 )
 
 
@@ -60,3 +61,38 @@ def test_merged_fov_is_union_of_historical_poses_in_latest_frame() -> None:
     )
     assert int(merged.sum()) > int(latest_only.sum())
     assert bool((merged & ~latest_only).any())
+
+
+def test_relative_planar_pose_targets_are_latest_from_each_frame() -> None:
+    first = np.eye(3, dtype=np.float64)
+    latest = np.asarray(
+        [
+            [0.0, -1.0, 2.0],
+            [1.0, 0.0, 3.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+    target = relative_planar_pose_targets(
+        np.stack((first, latest)),
+        target_frame=1,
+    )
+
+    expected_transform = np.linalg.inv(latest) @ first
+    expected_yaw = np.arctan2(
+        expected_transform[1, 0], expected_transform[0, 0]
+    )
+    assert torch.allclose(
+        target[0],
+        torch.tensor(
+            [
+                expected_transform[0, 2],
+                expected_transform[1, 2],
+                np.sin(expected_yaw),
+                np.cos(expected_yaw),
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    assert torch.equal(target[-1], torch.tensor([0.0, 0.0, 0.0, 1.0]))

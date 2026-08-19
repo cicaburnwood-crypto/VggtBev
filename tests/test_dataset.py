@@ -113,6 +113,11 @@ def test_dataset_separates_runtime_rgb_from_training_only_labels(tmp_path: Path)
     )
     sample = dataset[0]
     assert sample["images"].shape == (1, 3, 384, 512)
+    assert sample["relative_pose_target"].shape == (1, 4)
+    assert torch.equal(
+        sample["relative_pose_target"][0],
+        torch.tensor([0.0, 0.0, 0.0, 1.0]),
+    )
     assert sample["scale_gt_depth_m"].shape == (1, 384, 512)
     assert sample["scale_gt_intrinsics"].shape == (1, 3, 3)
     assert sample["single_fov_complete_target"].shape == (512, 512)
@@ -136,6 +141,7 @@ def test_dataset_separates_runtime_rgb_from_training_only_labels(tmp_path: Path)
 
     batch = method1_collate([sample])
     assert batch["images"].shape == (1, 1, 3, 384, 512)
+    assert batch["relative_pose_target"].shape == (1, 1, 4)
     assert batch["scale_gt_depth_m"].shape == (1, 1, 384, 512)
     assert batch["single_fov_complete_target"].shape == (1, 512, 512)
     assert batch["single_visible_target"].shape == (1, 512, 512)

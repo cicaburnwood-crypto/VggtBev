@@ -1,4 +1,12 @@
-# OdinEye P1B — Pixel Routing + Guessed Completion + Scale Token
+# OdinEye P1C - Geometry-Aware Merged BEV
+
+This branch extends P1B with an RGB-only relative SE(2) head over frozen VGGT
+camera/register tokens and uses its prediction to condition the Merged BEV
+decoder. See [P1C_ARCHITECTURE.md](P1C_ARCHITECTURE.md) for the new model,
+loss, staging, and diagnostic contracts. The P1B behavior documented below is
+retained as the unmodified baseline and Single branch.
+
+## P1B baseline retained by P1C
 
 The active implementation is a from-scratch replacement for the former P1B
 occupancy objective. Frozen VGGT aggregation runs exactly once per RGB window.

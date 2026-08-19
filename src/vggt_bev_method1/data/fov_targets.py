@@ -104,6 +104,44 @@ def fov_union_mask(
     return torch.from_numpy(np.asarray(image, dtype=np.uint8).copy()).bool()
 
 
+def relative_planar_pose_targets(
+    world_from_bev_planar: np.ndarray,
+    *,
+    target_frame: int,
+) -> torch.Tensor:
+    """Return metric SE(2) transforms from each frame into latest ego.
+
+    Each row is ``[tx_m, tz_m, sin(yaw), cos(yaw)]`` for
+    ``T_target_from_frame``.  These values are training labels only; runtime
+    pose is predicted from frozen VGGT camera/register tokens.
+    """
+
+    transforms = np.asarray(world_from_bev_planar, dtype=np.float64)
+    if transforms.ndim != 3 or transforms.shape[1:] != (3, 3):
+        raise ValueError("world_from_bev_planar must have shape [frames,3,3]")
+    if not 0 <= target_frame < transforms.shape[0]:
+        raise ValueError("target frame lies outside the pose sequence")
+    selected = transforms[: target_frame + 1]
+    if not np.isfinite(selected).all():
+        raise ValueError("world_from_bev_planar contains non-finite values")
+    target_from_world = np.linalg.inv(transforms[target_frame])
+    target_from_frame = target_from_world[None] @ selected
+    rotation = target_from_frame[:, :2, :2]
+    yaw = np.arctan2(rotation[:, 1, 0], rotation[:, 0, 0])
+    target = np.stack(
+        (
+            target_from_frame[:, 0, 2],
+            target_from_frame[:, 1, 2],
+            np.sin(yaw),
+            np.cos(yaw),
+        ),
+        axis=-1,
+    ).astype(np.float32)
+    # Avoid numerical noise in the supervised reference frame.
+    target[-1] = np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float32)
+    return torch.from_numpy(target)
+
+
 def cap_complete_and_visible_to_fov(
     complete: torch.Tensor,
     visible: torch.Tensor,

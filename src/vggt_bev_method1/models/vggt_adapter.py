@@ -278,8 +278,15 @@ class LiveVGGTOmegaAdapter(nn.Module):
                 if value is None:
                     raise RuntimeError(f"VGGT did not cache requested layer {layer}")
                 tokens[layer] = value[:, :, patch_start:].float().detach()
+            final_tokens = aggregated[-1]
+            if final_tokens is None:
+                raise RuntimeError("VGGT did not cache the final token layer")
+            camera_register_tokens = (
+                final_tokens[:, :, :patch_start].float().detach()
+            )
         return {
             "tokens": tokens,
+            "camera_register_tokens": camera_register_tokens,
             "patch_grid": (height // self.patch_size, width // self.patch_size),
             # Private frozen shared state is decoded only by the parallel
             # camera/depth branch. Method1Head never receives or consumes its

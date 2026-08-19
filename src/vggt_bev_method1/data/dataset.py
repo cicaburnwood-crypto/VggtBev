@@ -18,6 +18,7 @@ from .fov_targets import (
     cap_complete_and_visible_to_fov,
     fov_union_mask,
     load_world_from_bev_planar,
+    relative_planar_pose_targets,
 )
 from .preprocess import RGBResizePad
 from .void_coverage import FINAL_GT_VOID_FILTER, VoidCoverageIndex
@@ -625,8 +626,13 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             source_width=session.source_width,
         )
         frame_ids = list(range(target_frame + 1))
+        relative_pose_target = relative_planar_pose_targets(
+            session.world_from_bev_planar,
+            target_frame=target_frame,
+        )
         return {
             "images": torch.stack(images),
+            "relative_pose_target": relative_pose_target,
             "scale_gt_depth_m": torch.stack(depths),
             "scale_gt_valid_mask": torch.stack(depth_valid),
             "scale_gt_intrinsics": intrinsic.unsqueeze(0).expand(

@@ -8,6 +8,7 @@ from .fov_targets import (
     cap_complete_and_visible_to_fov,
     fov_union_mask,
     local_fov_polygon,
+    relative_planar_pose_targets,
 )
 from .manifest import (
     create_split_manifest,
@@ -36,6 +37,7 @@ __all__ = [
     "manifest_session_keys",
     "method1_collate",
     "local_fov_polygon",
+    "relative_planar_pose_targets",
     "split_sessions_by_scene",
     "P1BRegionMasks",
     "ROUTING_CLASS_COUNT",

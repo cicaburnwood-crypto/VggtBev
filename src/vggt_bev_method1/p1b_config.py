@@ -93,12 +93,29 @@ def validate_p1b_config(config: dict[str, Any]) -> None:
             "P1B Merged routing geometry must use native output resolution"
         )
     probability_model = str(model.get("probability_model", ""))
-    expected_pipeline = {
-        "evidential": "P1B-NLL",
-        "bce": "P1B-BCE",
-    }.get(probability_model)
-    if expected_pipeline is None:
+    geometry_conditioning = str(
+        model.get("geometry_conditioning", "none")
+    )
+    is_p1c = geometry_conditioning != "none"
+    if probability_model not in ("evidential", "bce"):
         raise ValueError("model.probability_model must be evidential or bce")
+    if is_p1c:
+        if probability_model != "evidential":
+            raise ValueError("P1C currently requires evidential probability")
+        expected_pipeline = "P1C-NLL"
+        if geometry_conditioning != "relative_se2_embedding":
+            raise ValueError(
+                "P1C geometry_conditioning must be relative_se2_embedding"
+            )
+        if str(config.get("teacher_cache", {}).get("mode", "live")) != "live":
+            raise ValueError(
+                "P1C camera/register token training currently requires live VGGT"
+            )
+    else:
+        expected_pipeline = {
+            "evidential": "P1B-NLL",
+            "bce": "P1B-BCE",
+        }[probability_model]
     if model.get("pipeline_variant") != expected_pipeline:
         raise ValueError(
             f"model.pipeline_variant must be {expected_pipeline} for {probability_model}"
@@ -115,11 +132,13 @@ def validate_p1b_config(config: dict[str, Any]) -> None:
     if training.get("stage") not in ("scale_only", "bev_only", "joint"):
         raise ValueError("training.stage is invalid")
     bev_objective = str(training.get("bev_objective", "full"))
-    if bev_objective not in (
+    valid_bev_objectives = (
         "full",
         "fov_support_only",
         "fov_support_and_observed_gate",
-    ):
+        *(("pose_only",) if is_p1c else ()),
+    )
+    if bev_objective not in valid_bev_objectives:
         raise ValueError("training.bev_objective is invalid")
     enabled = training.get("enabled_bev_branches", ["single", "merged"])
     if not enabled or set(enabled).difference(("single", "merged")):
@@ -295,6 +314,44 @@ def validate_p1b_config(config: dict[str, Any]) -> None:
             raise ValueError(
                 "role-balanced Gate weights must be non-negative and sum to 1"
             )
+    if is_p1c:
+        _positive(
+            model,
+            (
+                "pose_hidden_dim",
+                "pose_attention_heads",
+                "pose_layers",
+                "pose_refinements",
+            ),
+            "model",
+        )
+        if int(model["pose_hidden_dim"]) % int(model["pose_attention_heads"]):
+            raise ValueError(
+                "model.pose_hidden_dim must be divisible by pose_attention_heads"
+            )
+        if int(model.get("maximum_history", data["maximum_history"])) != int(
+            data["maximum_history"]
+        ):
+            raise ValueError("model.maximum_history must match data.maximum_history")
+        _positive(
+            training,
+            (
+                "pose_loss_weight",
+                "pose_translation_weight",
+                "pose_yaw_weight",
+                "pose_refinement_gamma",
+                "pose_smooth_l1_beta_m",
+            ),
+            "training",
+        )
+        if tuple(enabled) != ("merged",):
+            raise ValueError("P1C training must enable only the Merged branch")
+        if not freeze_single or training.get("stage") != "bev_only":
+            raise ValueError("P1C training must freeze Single in bev_only stage")
+        if bev_objective == "pose_only" and float(
+            training.get("observed_gate_pixel_weight", 0.0)
+        ) != 0.0:
+            raise ValueError("P1C pose_only forbids Observed Gate loss")
     forbidden = {
         "direct_priority_pcgrad",
         "guessed_completion_dice_weight",
