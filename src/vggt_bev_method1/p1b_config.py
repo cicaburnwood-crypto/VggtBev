@@ -182,6 +182,12 @@ def validate_p1b_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "training.fresh_merged_routing_initialization must be a boolean"
         )
+    if not isinstance(
+        training.get("routing_warmstart_allow_manifest_change", False), bool
+    ):
+        raise ValueError(
+            "training.routing_warmstart_allow_manifest_change must be a boolean"
+        )
     if fresh_merged_routing:
         if seed_merged_routing:
             raise ValueError(

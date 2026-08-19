@@ -331,11 +331,12 @@ def _resize_square_query_content(
 
 
 def initialize_merged_routing_warmstart(
-    model: P1BSystem,
+    model: P1BSystem | P1CSystem,
     checkpoint: str | Path,
     *,
     expected_manifest_sha256: str,
-) -> dict[str, int | str]:
+    allow_manifest_change: bool = False,
+) -> dict[str, int | str | bool]:
     """Warm-start only trained Merged routing into a new native query grid."""
 
     resolved = Path(checkpoint).expanduser().resolve()
@@ -345,7 +346,11 @@ def initialize_merged_routing_warmstart(
         "merged_observed_gate",
     ]:
         raise ValueError("routing warm-start checkpoint has invalid trained outputs")
-    if state.get("manifest_sha256") != expected_manifest_sha256:
+    source_manifest_sha256 = str(state.get("manifest_sha256", ""))
+    if (
+        source_manifest_sha256 != expected_manifest_sha256
+        and not allow_manifest_change
+    ):
         raise ValueError("routing warm-start manifest does not match current data")
     source_probability = str(state.get("probability_model", ""))
     if source_probability != model.unwrapped_head().probability_model:
@@ -393,6 +398,9 @@ def initialize_merged_routing_warmstart(
         "source_schema": str(state.get("checkpoint_schema", "")),
         "source_epoch": int(state.get("epoch", -1)),
         "source_global_step": int(state.get("global_step", -1)),
+        "source_manifest_sha256": source_manifest_sha256,
+        "target_manifest_sha256": expected_manifest_sha256,
+        "manifest_changed": source_manifest_sha256 != expected_manifest_sha256,
         "copied_tensor_count": copied,
         "resized_query_tensor_count": resized,
         "preserved_metric_buffer_count": preserved_geometry,
@@ -1397,6 +1405,9 @@ def main() -> None:
             model,
             routing_warmstart_path,
             expected_manifest_sha256=_base_dataset(train_dataset).split_manifest_sha256,
+            allow_manifest_change=bool(
+                training.get("routing_warmstart_allow_manifest_change", False)
+            ),
         )
     _set_stage(model, str(training["stage"]), branches, bev_objective)
     attention_checkpointing = _configure_attention_recomputation(
