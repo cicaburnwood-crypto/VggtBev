@@ -89,6 +89,9 @@ def main() -> None:
         selection_order=str(
             data.get("session_selection_order", "lexicographic_session_key")
         ),
+        skip_invalid_complete_sessions=bool(
+            data.get("skip_invalid_complete_sessions", False)
+        ),
     )
     print(
         json.dumps(
@@ -101,6 +104,9 @@ def main() -> None:
                 "validation_sessions": len(payload["validation"]),
                 "artifact_fingerprint": "path + byte-size + nanosecond mtime",
                 "source_writers_at_freeze": len(writers),
+                "invalid_complete_sessions": payload.get(
+                    "invalid_complete_session_count", 0
+                ),
                 "snapshot_scope": payload.get("snapshot_scope"),
             },
             indent=2,

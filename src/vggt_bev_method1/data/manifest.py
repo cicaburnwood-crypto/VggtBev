@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .dataset import load_session_records
+from .dataset import _load_record, discover_sessions, load_session_records
 
 FORMAT_VERSION = 6
 
@@ -83,6 +83,7 @@ def create_split_manifest(
     maximum_sessions: int | None = None,
     source_writer_count: int = 0,
     selection_order: str = "lexicographic_session_key",
+    skip_invalid_complete_sessions: bool = False,
 ) -> dict:
     """Freeze one exact dataset snapshot for new P1B."""
 
@@ -116,7 +117,22 @@ def create_split_manifest(
         )
     else:
         raise ValueError(f"unsupported session selection order: {selection_order}")
-    records = sorted(load_session_records(root), key=order_key)
+    invalid_complete_sessions: list[dict[str, str]] = []
+    if skip_invalid_complete_sessions:
+        records = []
+        for session_path in discover_sessions(root):
+            try:
+                records.append(_load_record(root, session_path))
+            except (FileNotFoundError, KeyError, OSError, TypeError, ValueError) as error:
+                invalid_complete_sessions.append(
+                    {
+                        "key": session_path.relative_to(root).as_posix(),
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
+    else:
+        records = load_session_records(root)
+    records = sorted(records, key=order_key)
     source_session_count = len(records)
     if maximum_sessions is not None:
         if maximum_sessions <= 0:
@@ -155,6 +171,8 @@ def create_split_manifest(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "dataset_root": str(root),
         "source_session_count": source_session_count,
+        "invalid_complete_session_count": len(invalid_complete_sessions),
+        "invalid_complete_sessions": invalid_complete_sessions,
         "maximum_sessions": maximum_sessions,
         "source_writer_count_at_freeze": int(source_writer_count),
         "snapshot_scope": (
