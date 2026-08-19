@@ -52,12 +52,18 @@ supervision, with later refinements weighted more strongly.
    MAE overall and by history length. It must beat the zero-motion baseline.
 2. `fov_support_and_observed_gate`: train the pose head, pose embedding,
    Merged routing projector, and Merged routing decoder together. Single,
-   Scale, Guessed, and VGGT remain frozen.
+   Scale, Guessed, and VGGT remain frozen. This stage must warm-start only the
+   verified Stage-1 pose head. Gate strength ramps in gradually; edge and
+   contour weights also ramp from zero while their mass initially trains the
+   filled interior.
 3. After geometry is verified, train Guessed Evidential NLL as a separate
    stage. P1C does not alter the existing Guessed loss contract yet.
 
 P1B checkpoints remain P1B artifacts. P1C uses a distinct checkpoint schema
 and cannot be mistaken for a P1B Merged model.
+
+Portable starting configs are `configs/p1c_pose_only_v1.toml` and
+`configs/p1c_pose_fov_gate_v1.toml`.
 
 ## Diagnostic contract
 

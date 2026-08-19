@@ -3,6 +3,11 @@ import math
 import torch
 import pytest
 
+from vggt_bev_method1.cli_train_p1b import (
+    _scheduled_ramp,
+    _scheduled_role_weights,
+)
+
 from vggt_bev_method1.models import (
     P1CHead,
     RelativeSE2PoseHead,
@@ -127,4 +132,26 @@ def test_p1c_pose_only_config_is_fail_closed() -> None:
     assert config["training"]["bev_objective"] == "pose_only"
     config["teacher_cache"]["mode"] = "read"
     with pytest.raises(ValueError, match="requires live VGGT"):
+        validate_p1b_config(config)
+
+
+def test_p1c_stage2_requires_pose_parent_and_ramps_boundaries() -> None:
+    config = load_p1b_config("configs/p1c_pose_fov_gate_v1.toml")
+    assert config["training"]["pose_warmstart_checkpoint"]
+
+    assert _scheduled_ramp(
+        10, 100, start_fraction=0.10, ramp_fraction=0.30
+    ) == 0.0
+    assert _scheduled_ramp(
+        25, 100, start_fraction=0.10, ramp_fraction=0.30
+    ) == pytest.approx(0.5)
+    assert _scheduled_role_weights(
+        0.25, 0.45, 0.20, 0.10, boundary_scale=0.0
+    ) == pytest.approx((0.90, 0.0, 0.0, 0.10))
+    assert _scheduled_role_weights(
+        0.25, 0.45, 0.20, 0.10, boundary_scale=1.0
+    ) == pytest.approx((0.25, 0.45, 0.20, 0.10))
+
+    config["training"]["pose_warmstart_checkpoint"] = ""
+    with pytest.raises(ValueError, match="requires a verified pose_only"):
         validate_p1b_config(config)

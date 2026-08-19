@@ -358,6 +358,29 @@ def validate_p1b_config(config: dict[str, Any]) -> None:
             training.get("observed_gate_pixel_weight", 0.0)
         ) != 0.0:
             raise ValueError("P1C pose_only forbids Observed Gate loss")
+        pose_warmstart = str(
+            training.get("pose_warmstart_checkpoint", "")
+        ).strip()
+        if bev_objective == "pose_only" and pose_warmstart:
+            raise ValueError("P1C pose_only must start without a pose parent")
+        if bev_objective != "pose_only" and not pose_warmstart:
+            raise ValueError(
+                "P1C BEV training requires a verified pose_only checkpoint"
+            )
+        schedule_pairs = (
+            (
+                "routing_boundary_start_fraction",
+                "routing_boundary_ramp_fraction",
+            ),
+            ("observed_gate_start_fraction", "observed_gate_ramp_fraction"),
+        )
+        for start_name, ramp_name in schedule_pairs:
+            start = float(training.get(start_name, 0.0))
+            ramp = float(training.get(ramp_name, 0.0))
+            if not 0.0 <= start <= 1.0 or not 0.0 <= ramp <= 1.0:
+                raise ValueError(f"{start_name}/{ramp_name} must be in [0,1]")
+            if start + ramp > 1.0:
+                raise ValueError(f"{start_name}+{ramp_name} cannot exceed 1")
     forbidden = {
         "direct_priority_pcgrad",
         "guessed_completion_dice_weight",

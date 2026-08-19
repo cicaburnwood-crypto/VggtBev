@@ -302,6 +302,46 @@ def initialize_frozen_single_baseline(
     }
 
 
+def initialize_p1c_pose_warmstart(
+    model: P1CSystem,
+    checkpoint: str | Path,
+    *,
+    expected_manifest_sha256: str,
+) -> dict[str, int | str]:
+    """Load only a verified P1C Stage-1 relative-pose head."""
+
+    resolved = Path(checkpoint).expanduser().resolve()
+    state = torch.load(resolved, map_location="cpu", weights_only=False)
+    if state.get("pipeline_id") != "P1C-NLL":
+        raise ValueError("pose warm-start is not a P1C checkpoint")
+    if state.get("trained_outputs") != ["relative_se2_pose"]:
+        raise ValueError("pose warm-start was not produced by pose_only")
+    if state.get("manifest_sha256") != expected_manifest_sha256:
+        raise ValueError("pose warm-start manifest does not match current data")
+    source = state["head"]
+    head = model.unwrapped_head()
+    initialized = head.state_dict()
+    prefix = "relative_pose_head."
+    copied = 0
+    for key, target in tuple(initialized.items()):
+        if not key.startswith(prefix):
+            continue
+        if key not in source or source[key].shape != target.shape:
+            raise ValueError(f"pose warm-start tensor mismatch: {key}")
+        initialized[key] = source[key].to(dtype=target.dtype)
+        copied += 1
+    if copied == 0:
+        raise ValueError("pose warm-start did not contain pose-head tensors")
+    head.load_state_dict(initialized, strict=True)
+    return {
+        "checkpoint": str(resolved),
+        "checkpoint_sha256": _checkpoint_sha256(resolved),
+        "source_epoch": int(state.get("epoch", -1)),
+        "source_global_step": int(state.get("global_step", -1)),
+        "copied_tensor_count": copied,
+    }
+
+
 def _resize_square_query_content(
     source: torch.Tensor,
     target: torch.Tensor,
@@ -491,6 +531,37 @@ def _loss_weights(training: dict) -> P1BLossWeights:
     )
 
 
+def _scheduled_ramp(
+    global_step: int,
+    total_steps: int,
+    *,
+    start_fraction: float,
+    ramp_fraction: float,
+) -> float:
+    progress = float(global_step) / float(max(total_steps, 1))
+    if progress <= start_fraction:
+        return 0.0
+    if ramp_fraction <= 0.0:
+        return 1.0
+    return min(max((progress - start_fraction) / ramp_fraction, 0.0), 1.0)
+
+
+def _scheduled_role_weights(
+    interior: float,
+    edge: float,
+    contour: float,
+    region: float,
+    *,
+    boundary_scale: float,
+) -> tuple[float, float, float, float]:
+    scheduled_edge = edge * boundary_scale
+    scheduled_contour = contour * boundary_scale
+    scheduled_interior = 1.0 - scheduled_edge - scheduled_contour - region
+    if min(scheduled_interior, scheduled_edge, scheduled_contour, region) < 0.0:
+        raise ValueError("scheduled role weights must remain non-negative")
+    return scheduled_interior, scheduled_edge, scheduled_contour, region
+
+
 def step_losses(
     prediction: dict,
     batch: dict,
@@ -528,6 +599,27 @@ def step_losses(
         ):
             if branches != ("merged",):
                 raise ValueError("routing-geometry loss requires Merged only")
+            boundary_schedule_scale = (
+                _scheduled_ramp(
+                    global_step,
+                    total_steps,
+                    start_fraction=float(
+                        training.get("routing_boundary_start_fraction", 0.0)
+                    ),
+                    ramp_fraction=float(
+                        training.get("routing_boundary_ramp_fraction", 0.0)
+                    ),
+                )
+                if training["pipeline"] == "P1C-NLL"
+                else 1.0
+            )
+            support_roles = _scheduled_role_weights(
+                float(training.get("support_interior_weight", 0.25)),
+                float(training.get("support_edge_weight", 0.45)),
+                float(training.get("support_contour_weight", 0.20)),
+                float(training.get("support_region_dice_weight", 0.10)),
+                boundary_scale=boundary_schedule_scale,
+            )
             support_arguments = {
                 "variant": str(training["support_loss_variant"]),
                 "bce_weight": float(training.get("support_bce_weight", 0.65)),
@@ -541,18 +633,10 @@ def step_losses(
                 "boundary_radius": int(
                     training.get("support_boundary_radius", 2)
                 ),
-                "interior_weight": float(
-                    training.get("support_interior_weight", 0.25)
-                ),
-                "edge_weight": float(
-                    training.get("support_edge_weight", 0.45)
-                ),
-                "contour_weight": float(
-                    training.get("support_contour_weight", 0.20)
-                ),
-                "region_dice_weight": float(
-                    training.get("support_region_dice_weight", 0.10)
-                ),
+                "interior_weight": support_roles[0],
+                "edge_weight": support_roles[1],
+                "contour_weight": support_roles[2],
+                "region_dice_weight": support_roles[3],
                 "tversky_false_positive_weight": float(
                     training.get(
                         "support_tversky_false_positive_weight", 0.70
@@ -568,12 +652,30 @@ def step_losses(
                 gate_start_fraction = float(
                     training.get("observed_gate_start_fraction", 0.0)
                 )
-                gate_schedule_scale = float(
-                    float(global_step) / float(max(total_steps, 1))
-                    >= gate_start_fraction
+                gate_schedule_scale = (
+                    _scheduled_ramp(
+                        global_step,
+                        total_steps,
+                        start_fraction=gate_start_fraction,
+                        ramp_fraction=float(
+                            training.get("observed_gate_ramp_fraction", 0.0)
+                        ),
+                    )
+                    if training["pipeline"] == "P1C-NLL"
+                    else float(
+                        float(global_step) / float(max(total_steps, 1))
+                        >= gate_start_fraction
+                    )
                 )
                 configured_gate_weight = float(
                     training["observed_gate_pixel_weight"]
+                )
+                gate_roles = _scheduled_role_weights(
+                    float(training.get("observed_gate_interior_weight", 0.20)),
+                    float(training.get("observed_gate_edge_weight", 0.50)),
+                    float(training.get("observed_gate_contour_weight", 0.20)),
+                    float(training.get("observed_gate_dice_weight", 0.10)),
+                    boundary_scale=boundary_schedule_scale,
                 )
                 routing_loss = p1b_routing_geometry_loss(
                     prediction["merged_bev"],
@@ -591,18 +693,10 @@ def step_losses(
                     gate_boundary_radius=int(
                         training.get("observed_gate_boundary_radius", 3)
                     ),
-                    gate_interior_weight=float(
-                        training.get("observed_gate_interior_weight", 0.20)
-                    ),
-                    gate_edge_weight=float(
-                        training.get("observed_gate_edge_weight", 0.50)
-                    ),
-                    gate_contour_weight=float(
-                        training.get("observed_gate_contour_weight", 0.20)
-                    ),
-                    gate_dice_weight=float(
-                        training.get("observed_gate_dice_weight", 0.10)
-                    ),
+                    gate_interior_weight=gate_roles[0],
+                    gate_edge_weight=gate_roles[1],
+                    gate_contour_weight=gate_roles[2],
+                    gate_dice_weight=gate_roles[3],
                     **support_arguments,
                 )
                 routing_loss["observed_gate_schedule_scale"] = torch.tensor(
@@ -622,6 +716,10 @@ def step_losses(
                     f"merged_bev_{key}": value
                     for key, value in routing_loss.items()
                 }
+            )
+            values["merged_bev_boundary_schedule_scale"] = torch.tensor(
+                boundary_schedule_scale,
+                device=prediction["merged_bev"]["fov_support_logit"].device,
             )
             values["bev_loss"] = bev_total
         else:
@@ -855,6 +953,18 @@ def checkpoint_contract(config: dict, manifest_sha256: str) -> dict:
                 "routing_query_migration": (
                     "bilinear-query-content-preserve-native-metric-grid-v1"
                 ),
+            }
+        )
+    pose_warmstart = str(
+        config["training"].get("pose_warmstart_checkpoint", "")
+    ).strip()
+    if pose_warmstart:
+        contract.update(
+            {
+                "pose_parent_checkpoint_sha256": _checkpoint_sha256(
+                    Path(pose_warmstart).expanduser().resolve()
+                ),
+                "pose_parent_scope": "relative-pose-head-only",
             }
         )
     void_index = config["data"].get("void_coverage_index")
@@ -1409,6 +1519,20 @@ def main() -> None:
                 training.get("routing_warmstart_allow_manifest_change", False)
             ),
         )
+    pose_warmstart = None
+    pose_warmstart_path = str(
+        training.get("pose_warmstart_checkpoint", "")
+    ).strip()
+    if pose_warmstart_path:
+        if not isinstance(model, P1CSystem):
+            raise ValueError("pose warm-start requires a P1C model")
+        pose_warmstart = initialize_p1c_pose_warmstart(
+            model,
+            pose_warmstart_path,
+            expected_manifest_sha256=_base_dataset(
+                train_dataset
+            ).split_manifest_sha256,
+        )
     _set_stage(model, str(training["stage"]), branches, bev_objective)
     attention_checkpointing = _configure_attention_recomputation(
         model,
@@ -1582,6 +1706,7 @@ def main() -> None:
                     "projector_layout": "branch-specific-single-merged-v1",
                     "single_baseline_initialization": baseline_initialization,
                     "routing_warmstart": routing_warmstart,
+                    "pose_warmstart": pose_warmstart,
                     "vggt_runs_per_batch": 1,
                     "bev_objective": bev_objective,
                     "trained_output": (
