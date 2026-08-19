@@ -51,7 +51,7 @@ def load_split_config(path: str | Path) -> dict:
     with resolved.open("rb") as stream:
         raw = tomllib.load(stream)
     pipeline = str(raw.get("training", {}).get("pipeline", ""))
-    if pipeline in ("P1B-NLL", "P1B-BCE"):
+    if pipeline in ("P1B-NLL", "P1B-BCE", "P1C-NLL"):
         return load_p1b_config(resolved)
     return load_config(resolved)
 
