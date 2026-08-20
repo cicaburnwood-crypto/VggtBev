@@ -278,6 +278,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         merged_source_extent_m: float = 10.0,
         merged_bev_extent_m: float = 10.0,
         merged_bev_output_size: int = 800,
+        include_single_targets: bool = True,
     ) -> None:
         if supervision != "metric_fov_complete_evidential":
             raise ValueError(
@@ -305,6 +306,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         self.merged_source_extent_m = float(merged_source_extent_m)
         self.merged_bev_extent_m = float(merged_bev_extent_m)
         self.merged_bev_output_size = int(merged_bev_output_size)
+        self.include_single_targets = bool(include_single_targets)
         self.void_coverage = (
             VoidCoverageIndex(
                 void_coverage_index,
@@ -504,22 +506,24 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             / "bev_6p5m/merged_complete_10m"
             / f"frame_{target_frame:06d}.png"
         )
-        source_single_complete = self._load_bev(
-            single_complete_path,
-            source_extent_m=self.single_bev_extent_m,
-            output_extent_m=self.single_bev_extent_m,
-            output_size=self.single_bev_output_size,
-        )
-        if bool((source_single_complete == self.labels.unknown).any()):
-            raise ValueError(
-                f"single complete target contains unknown cells: {single_complete_path}"
+        if self.include_single_targets:
+            source_single_complete = self._load_bev(
+                single_complete_path,
+                source_extent_m=self.single_bev_extent_m,
+                output_extent_m=self.single_bev_extent_m,
+                output_size=self.single_bev_output_size,
             )
-        source_single_visible = self._load_bev(
-            single_observed_path,
-            source_extent_m=self.single_bev_extent_m,
-            output_extent_m=self.single_bev_extent_m,
-            output_size=self.single_bev_output_size,
-        )
+            if bool((source_single_complete == self.labels.unknown).any()):
+                raise ValueError(
+                    "single complete target contains unknown cells: "
+                    f"{single_complete_path}"
+                )
+            source_single_visible = self._load_bev(
+                single_observed_path,
+                source_extent_m=self.single_bev_extent_m,
+                output_extent_m=self.single_bev_extent_m,
+                output_size=self.single_bev_output_size,
+            )
         source_merged_complete = self._load_bev(
             merged_complete_path,
             source_extent_m=self.merged_source_extent_m,
@@ -532,25 +536,27 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             output_extent_m=self.merged_bev_extent_m,
             output_size=self.merged_bev_output_size,
         )
-        self._validate_bev_pair(
-            source_single_complete,
-            source_single_visible,
-            name="single",
-        )
+        if self.include_single_targets:
+            self._validate_bev_pair(
+                source_single_complete,
+                source_single_visible,
+                name="single",
+            )
         self._validate_bev_pair(
             source_merged_complete,
             source_merged_visible,
             name="merged",
         )
 
-        single_fov = fov_union_mask(
-            session.world_from_bev_planar[target_frame : target_frame + 1],
-            target_frame=0,
-            horizontal_fov_degrees=session.horizontal_fov_degrees,
-            output_size=self.single_bev_output_size,
-            output_extent_m=self.single_bev_extent_m,
-            source_extent_m=self.single_bev_extent_m,
-        )
+        if self.include_single_targets:
+            single_fov = fov_union_mask(
+                session.world_from_bev_planar[target_frame : target_frame + 1],
+                target_frame=0,
+                horizontal_fov_degrees=session.horizontal_fov_degrees,
+                output_size=self.single_bev_output_size,
+                output_extent_m=self.single_bev_extent_m,
+                source_extent_m=self.single_bev_extent_m,
+            )
         merged_fov = fov_union_mask(
             session.world_from_bev_planar,
             target_frame=target_frame,
@@ -559,16 +565,17 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             output_extent_m=self.merged_bev_extent_m,
             source_extent_m=self.single_bev_extent_m,
         )
-        (
-            single_fov_complete,
-            single_visible,
-            single_fov_support,
-        ) = cap_complete_and_visible_to_fov(
-            source_single_complete,
-            source_single_visible,
-            single_fov,
-            labels=self.labels,
-        )
+        if self.include_single_targets:
+            (
+                single_fov_complete,
+                single_visible,
+                single_fov_support,
+            ) = cap_complete_and_visible_to_fov(
+                source_single_complete,
+                source_single_visible,
+                single_fov,
+                labels=self.labels,
+            )
         (
             merged_fov_complete,
             merged_visible,
@@ -579,20 +586,22 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             merged_fov,
             labels=self.labels,
         )
-        self._validate_bev_pair(
-            single_fov_complete,
-            single_visible,
-            name="single FOV-complete",
-        )
+        if self.include_single_targets:
+            self._validate_bev_pair(
+                single_fov_complete,
+                single_visible,
+                name="single FOV-complete",
+            )
         self._validate_bev_pair(
             merged_fov_complete,
             merged_visible,
             name="merged FOV-complete",
         )
         if self.void_coverage is None:
-            single_gt_valid = torch.ones_like(
-                single_fov_support, dtype=torch.bool
-            )
+            if self.include_single_targets:
+                single_gt_valid = torch.ones_like(
+                    single_fov_support, dtype=torch.bool
+                )
             merged_gt_valid = torch.ones_like(
                 merged_fov_support, dtype=torch.bool
             )
@@ -605,13 +614,14 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             reference_pose = session.world_from_bev_planar[target_frame]
             # GT validity comes only from the repaired global scene geometry
             # and the output-grid pose. FOV and masked visibility are not inputs.
-            single_gt_valid = self.void_coverage.render_valid_mask(
-                scene_key=session.scene_key,
-                floor_height_m=session.floor_height_m,
-                world_from_bev_planar=reference_pose,
-                output_size=self.single_bev_output_size,
-                output_extent_m=self.single_bev_extent_m,
-            )
+            if self.include_single_targets:
+                single_gt_valid = self.void_coverage.render_valid_mask(
+                    scene_key=session.scene_key,
+                    floor_height_m=session.floor_height_m,
+                    world_from_bev_planar=reference_pose,
+                    output_size=self.single_bev_output_size,
+                    output_extent_m=self.single_bev_extent_m,
+                )
             merged_gt_valid = self.void_coverage.render_valid_mask(
                 scene_key=session.scene_key,
                 floor_height_m=session.floor_height_m,
@@ -630,7 +640,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             session.world_from_bev_planar,
             target_frame=target_frame,
         )
-        return {
+        output = {
             "images": torch.stack(images),
             "relative_pose_target": relative_pose_target,
             "scale_gt_depth_m": torch.stack(depths),
@@ -638,10 +648,6 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             "scale_gt_intrinsics": intrinsic.unsqueeze(0).expand(
                 target_frame + 1, -1, -1
             ).clone(),
-            "single_fov_complete_target": single_fov_complete,
-            "single_visible_target": single_visible,
-            "single_fov_support_target": single_fov_support,
-            "single_gt_valid_mask": single_gt_valid,
             "merged_fov_complete_target": merged_fov_complete,
             "merged_visible_target": merged_visible,
             "merged_fov_support_target": merged_fov_support,
@@ -656,8 +662,6 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 "reference_frame_id": target_frame,
                 "source_frame_ids": frame_ids,
                 "history_frame_count": target_frame + 1,
-                "single_source_complete_path": str(single_complete_path),
-                "single_source_visible_path": str(single_observed_path),
                 "merged_source_complete_path": str(merged_complete_path),
                 "merged_source_visible_path": str(merged_observed_path),
                 "fov_target_generation": "on_the_fly_unobstructed_horizontal_frustum_v1",
@@ -666,12 +670,6 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 "source_gt_depth_convention": session.source_gt_depth_convention,
                 "preprocessing_version": self.preprocess.version,
                 "coordinate_mode": "p1b_fixed_metric",
-                "single_bev_extent_m": self.single_bev_extent_m,
-                "single_bev_output_size": self.single_bev_output_size,
-                "single_bev_cell_size_m": (
-                    self.single_bev_extent_m / self.single_bev_output_size
-                ),
-                "single_bev_bounds_m": [-3.25, 3.25, -3.25, 3.25],
                 "merged_bev_extent_m": self.merged_bev_extent_m,
                 "merged_bev_output_size": self.merged_bev_output_size,
                 "merged_bev_cell_size_m": (
@@ -718,3 +716,25 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 "void_coverage_index_sha256": void_index_sha256,
             },
         }
+        if self.include_single_targets:
+            output.update(
+                {
+                    "single_fov_complete_target": single_fov_complete,
+                    "single_visible_target": single_visible,
+                    "single_fov_support_target": single_fov_support,
+                    "single_gt_valid_mask": single_gt_valid,
+                }
+            )
+            output["metadata"].update(
+                {
+                    "single_source_complete_path": str(single_complete_path),
+                    "single_source_visible_path": str(single_observed_path),
+                    "single_bev_extent_m": self.single_bev_extent_m,
+                    "single_bev_output_size": self.single_bev_output_size,
+                    "single_bev_cell_size_m": (
+                        self.single_bev_extent_m / self.single_bev_output_size
+                    ),
+                    "single_bev_bounds_m": [-3.25, 3.25, -3.25, 3.25],
+                }
+            )
+        return output
