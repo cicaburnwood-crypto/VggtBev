@@ -20,9 +20,9 @@ split_seed = 170815
 split_manifest = "manifests/wtbd_first80k.json"
 
 [model]
-pipeline_variant = "WTBD-MERGE-SCALE-NLL"
+pipeline_variant = "WTBD-IMPLICIT-MERGE-SCALE-NLL"
 probability_model = "evidential"
-geometry_conditioning = "native_vggt_extrinsics"
+geometry_conditioning = "implicit_multiview_token_cross_attention"
 vggt_source = "vendor/backbone"
 checkpoint = "checkpoints/model.pt"
 patch_size = 16
@@ -34,7 +34,7 @@ attention_heads = 8
 decoder_layers = 2
 scale_decoder_layers = 2
 self_attention_mode = "linear"
-cross_attention_mode = "deformable"
+cross_attention_mode = "linear"
 deformable_samples = 4
 cross_query_chunk_size = 8192
 merged_latent_bev_size = 100
@@ -43,6 +43,11 @@ merged_bev_output_size = 800
 merged_bev_extent_vggt = 6.5
 native_query_resolution = false
 predict_scale_uncertainty = true
+implicit_geometry_hidden_dim = 256
+implicit_geometry_heads = 8
+implicit_geometry_layers = 4
+maximum_history = 10
+maximum_prefix_tokens = 17
 
 [scale_fit]
 confidence_threshold = 0.2
@@ -63,7 +68,7 @@ mode = "live"
 root = "cache/wtbd_teacher"
 
 [training]
-pipeline = "WTBD-MERGE-SCALE-NLL"
+pipeline = "WTBD-IMPLICIT-MERGE-SCALE-NLL"
 stage = "joint"
 initialization = "fresh"
 device = "cuda"
@@ -105,4 +110,4 @@ seed = 170820
 log_every_steps = 20
 checkpoint_every_steps = 1000
 validation_batches = 200
-output_dir = "runs/wtbd_merge_scale_first80k_fresh_v1"
+output_dir = "runs/wtbd_implicit_merge_scale_first80k_fresh_v2"

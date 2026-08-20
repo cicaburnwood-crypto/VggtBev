@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 
-PIPELINE_ID = "WTBD-MERGE-SCALE-NLL"
-CHECKPOINT_SCHEMA = "wtbd-merge-only-native-geometry-vggt-unit-scale-v1"
+PIPELINE_ID = "WTBD-IMPLICIT-MERGE-SCALE-NLL"
+CHECKPOINT_SCHEMA = (
+    "wtbd-merge-only-implicit-geometry-cross-attention-scale-v2"
+)
 
 
 def load_wtbd_config(path: str | Path) -> dict[str, Any]:
@@ -34,9 +36,16 @@ def validate_wtbd_config(config: dict[str, Any]) -> None:
         raise ValueError(f"training.pipeline must be {PIPELINE_ID}")
     if str(model.get("probability_model")) != "evidential":
         raise ValueError("WTBD Merge-Scale requires evidential NLL")
-    if str(model.get("geometry_conditioning")) != "native_vggt_extrinsics":
+    if str(model.get("geometry_conditioning")) != (
+        "implicit_multiview_token_cross_attention"
+    ):
         raise ValueError(
-            "model.geometry_conditioning must be native_vggt_extrinsics"
+            "model.geometry_conditioning must be "
+            "implicit_multiview_token_cross_attention"
+        )
+    if str(model.get("cross_attention_mode")) != "linear":
+        raise ValueError(
+            "WTBD v2 requires global linear cross-attention over all frames"
         )
     if str(data.get("coordinate_mode")) != "metric_source_to_vggt_units":
         raise ValueError("data.coordinate_mode must be metric_source_to_vggt_units")
@@ -57,6 +66,24 @@ def validate_wtbd_config(config: dict[str, Any]) -> None:
     latent_size = int(model.get("merged_latent_bev_size", 0))
     if output_size <= 0 or latent_size <= 0 or latent_size > output_size:
         raise ValueError("Merged latent/output sizes are invalid")
+    if int(model.get("maximum_history", 0)) != int(data["maximum_history"]):
+        raise ValueError(
+            "model.maximum_history must match data.maximum_history"
+        )
+    for key in (
+        "implicit_geometry_hidden_dim",
+        "implicit_geometry_heads",
+        "implicit_geometry_layers",
+        "maximum_prefix_tokens",
+    ):
+        if int(model.get(key, 0)) <= 0:
+            raise ValueError(f"model.{key} must be positive")
+    if int(model["implicit_geometry_hidden_dim"]) % int(
+        model["implicit_geometry_heads"]
+    ):
+        raise ValueError(
+            "implicit geometry hidden dim must be divisible by its heads"
+        )
     if bool(model.get("native_query_resolution", False)) and latent_size != output_size:
         raise ValueError("native_query_resolution requires latent_size == output_size")
     if any(
@@ -96,6 +123,6 @@ def validate_wtbd_config(config: dict[str, Any]) -> None:
         raise ValueError("training.batch_size must be positive")
     if str(config.get("teacher_cache", {}).get("mode", "live")) != "live":
         raise ValueError(
-            "WTBD v1 requires teacher_cache.mode=live; cached geometry is not "
-            "silently accepted until its native-extrinsic contract is versioned"
+            "WTBD v2 requires teacher_cache.mode=live; frozen tokens and "
+            "training-only scale labels must use the runtime VGGT checkpoint"
         )

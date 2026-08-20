@@ -106,6 +106,13 @@ def build_model(config: dict, device: torch.device) -> WTBDMergeScaleSystem:
         predict_scale_uncertainty=bool(
             values.get("predict_scale_uncertainty", True)
         ),
+        implicit_geometry_hidden_dim=int(
+            values["implicit_geometry_hidden_dim"]
+        ),
+        implicit_geometry_heads=int(values["implicit_geometry_heads"]),
+        implicit_geometry_layers=int(values["implicit_geometry_layers"]),
+        maximum_history=int(values["maximum_history"]),
+        maximum_prefix_tokens=int(values["maximum_prefix_tokens"]),
     ).to(device)
 
 
@@ -115,7 +122,7 @@ def _set_stage(model: WTBDMergeScaleSystem, stage: str) -> None:
         parameter.requires_grad_(False)
     if stage in ("merged_only", "joint"):
         for module in (
-            head.native_geometry_embedding,
+            head.implicit_geometry_trunk,
             head.merged_guessed_token_projector,
             head.merged_routing_token_projector,
             head.merged_bev_decoder,
@@ -160,7 +167,6 @@ def _forward_losses(
     geometry = model.decode_teacher_geometry(extraction)
     prediction = model.forward_head(
         extraction,
-        geometry,
         include_merged=stage in ("merged_only", "joint"),
         include_scale=stage in ("scale_only", "joint"),
         assemble_runtime_outputs=False,
@@ -253,7 +259,11 @@ def _contract(config: dict, manifest_sha256: str, vggt_sha256: str) -> dict:
         "merged_output_size": int(model["merged_bev_output_size"]),
         "scale_unit": "meter_per_vggt_runtime_unit",
         "scale_is_merged_input": False,
-        "geometry_conditioning": "native_vggt_extrinsics",
+        "geometry_conditioning": (
+            "implicit_multiview_token_cross_attention"
+        ),
+        "extrinsic_input_present": False,
+        "bev_waits_for_geometry_heads": False,
         "runtime_external_inputs": ["rgb_window"],
     }
 
@@ -287,9 +297,12 @@ def _save_checkpoint(
             "runtime_contract": {
                 "input": ["RGB frames"],
                 "internal_frozen_predictions": [
-                    "VGGT tokens",
-                    "VGGT native camera extrinsics",
-                    "VGGT depth/intrinsics for scale diagnostics",
+                    "VGGT patch tokens",
+                    "VGGT camera/register tokens",
+                ],
+                "training_only_teacher_predictions": [
+                    "VGGT depth/confidence for lambda target construction",
+                    "VGGT camera/intrinsics for aligned scale diagnostics",
                 ],
                 "outputs": [
                     "Merged evidential BEV in VGGT units",

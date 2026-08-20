@@ -5,8 +5,10 @@ Standalone training pipeline for a frozen-VGGT extension with two outputs:
 1. a temporal Merged evidential BEV in VGGT runtime units;
 2. a parallel metric Scale Token in metre per VGGT runtime unit.
 
-There is no Single BEV branch and no learned relative-pose head. Original VGGT
-extrinsics condition the Merged branch; predicted scale never does.
+There is no Single BEV branch, explicit extrinsic input, or learned
+relative-pose head. A head-local multi-frame token trunk learns geometry
+implicitly and Merged queries cross-attend to all ordered frame tokens.
+Predicted scale never conditions Merged.
 
 The full architecture, target conversion, losses and runtime coordinate
 contract are documented in `WTBD_MERGE_SCALE_PIPELINE.md`.

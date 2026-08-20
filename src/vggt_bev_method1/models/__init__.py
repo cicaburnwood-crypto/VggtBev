@@ -32,10 +32,11 @@ from .p1c import (
 from .vggt_adapter import LiveVGGTOmegaAdapter
 from .wtbd_merge_scale import (
     DenseVGGTUnitQueryDecoder,
+    ImplicitGeometryBlock,
+    ImplicitGeometryContextTrunk,
     VGGTUnitPixelRoutedBEVDecoder,
     WTBDMergeScaleHead,
     WTBDMergeScaleSystem,
-    relative_native_geometry_features,
 )
 
 __all__ = [
@@ -65,8 +66,9 @@ __all__ = [
     "RelativeSE2PoseHead",
     "compose_se2_residual",
     "DenseVGGTUnitQueryDecoder",
+    "ImplicitGeometryBlock",
+    "ImplicitGeometryContextTrunk",
     "VGGTUnitPixelRoutedBEVDecoder",
     "WTBDMergeScaleHead",
     "WTBDMergeScaleSystem",
-    "relative_native_geometry_features",
 ]

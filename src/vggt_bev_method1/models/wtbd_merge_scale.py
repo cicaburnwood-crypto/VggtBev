@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .attention import DirectDecoderBlock
+from .attention import DirectDecoderBlock, MultiheadAttention
 from .method1 import MetricScaleTokenHead, MultiScaleTokenProjector
 from .p1b_probability import (
     ProbabilityModel,
@@ -14,57 +14,109 @@ from .p1b_probability import (
 )
 
 
-def relative_native_geometry_features(
-    camera_from_world: torch.Tensor,
-    scene_radius_vggt: torch.Tensor,
-    *,
-    canonical_extent_vggt: float,
-) -> torch.Tensor:
-    """Encode frozen VGGT camera geometry without introducing metric scale.
+class ImplicitGeometryBlock(nn.Module):
+    """Head-local cross-frame reasoning block, following VGGT CameraHead."""
 
-    The returned per-frame feature uses the exact camera-from-world matrices
-    predicted in the current VGGT window.  Translations remain VGGT-native;
-    they are represented both relative to the canonical BEV extent and to the
-    VGGT scene radius.  No GT pose, camera height, Scale Token or Single BEV is
-    consumed.
+    def __init__(self, hidden_dim: int, heads: int, expansion: int = 4) -> None:
+        super().__init__()
+        self.attention_norm = nn.LayerNorm(hidden_dim)
+        self.attention = MultiheadAttention(hidden_dim, heads, mode="exact")
+        self.ffn_norm = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * expansion),
+            nn.GELU(),
+            nn.Linear(hidden_dim * expansion, hidden_dim),
+        )
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        normalized = self.attention_norm(tokens)
+        tokens = tokens + self.attention(normalized, normalized)
+        return tokens + self.ffn(self.ffn_norm(tokens))
+
+
+class ImplicitGeometryContextTrunk(nn.Module):
+    """Infer frame geometry latents without predicting or consuming poses.
+
+    VGGT's released CameraHead mixes final camera/register tokens from all
+    frames through four head-local transformer blocks before regressing pose.
+    This trunk keeps the same useful reasoning pattern, but ends at a latent
+    per-frame context.  It has no pose output, pose loss, extrinsic input or
+    geometry post-processing path.
     """
 
-    if camera_from_world.ndim != 4 or camera_from_world.shape[-2:] != (3, 4):
-        raise ValueError("camera_from_world must have shape [B,N,3,4]")
-    if scene_radius_vggt.shape != camera_from_world.shape[:1]:
-        raise ValueError("scene_radius_vggt must have shape [B]")
-    if canonical_extent_vggt <= 0.0:
-        raise ValueError("canonical extent must be positive")
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        heads: int,
+        layers: int,
+        maximum_history: int,
+        maximum_prefix_tokens: int = 17,
+    ) -> None:
+        super().__init__()
+        if layers <= 0 or maximum_history <= 0 or maximum_prefix_tokens <= 0:
+            raise ValueError("implicit geometry trunk dimensions must be positive")
+        self.maximum_history = int(maximum_history)
+        self.maximum_prefix_tokens = int(maximum_prefix_tokens)
+        self.input_projection = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+        )
+        self.frame_age_embedding = nn.Parameter(
+            torch.empty(maximum_history, hidden_dim)
+        )
+        self.prefix_type_embedding = nn.Parameter(
+            torch.empty(maximum_prefix_tokens, hidden_dim)
+        )
+        self.latest_reference_embedding = nn.Parameter(torch.empty(hidden_dim))
+        self.blocks = nn.ModuleList(
+            [ImplicitGeometryBlock(hidden_dim, heads) for _ in range(layers)]
+        )
+        self.output_norm = nn.LayerNorm(hidden_dim)
+        self.output_projection = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        nn.init.normal_(self.frame_age_embedding, std=0.02)
+        nn.init.normal_(self.prefix_type_embedding, std=0.02)
+        nn.init.normal_(self.latest_reference_embedding, std=0.02)
 
-    batch, frames = camera_from_world.shape[:2]
-    bottom = camera_from_world.new_zeros(batch, frames, 1, 4)
-    bottom[..., 0, 3] = 1.0
-    homogeneous = torch.cat((camera_from_world, bottom), dim=-2)
-    world_from_camera = torch.linalg.inv(homogeneous)
-    latest_from_frame = homogeneous[:, -1:, :, :] @ world_from_camera
-    rotation = latest_from_frame[..., :3, :3].reshape(batch, frames, 9)
-    translation = latest_from_frame[..., :3, 3]
-    normalized_extent = translation / float(canonical_extent_vggt)
-    normalized_radius = translation / scene_radius_vggt[:, None, None].clamp_min(
-        1e-6
-    )
-    if frames == 1:
-        age = translation.new_zeros(batch, 1, 1)
-    else:
-        age_values = torch.arange(
+    def forward(self, prefix_tokens: torch.Tensor) -> torch.Tensor:
+        if prefix_tokens.ndim != 4:
+            raise ValueError("camera/register tokens must have shape [B,N,P,C]")
+        batch, frames, prefix_count, _ = prefix_tokens.shape
+        if frames > self.maximum_history:
+            raise ValueError("frame count exceeds implicit trunk maximum_history")
+        if prefix_count > self.maximum_prefix_tokens:
+            raise ValueError("prefix token count exceeds configured maximum")
+        tokens = self.input_projection(prefix_tokens)
+        frame_age = torch.arange(
             frames - 1,
             -1,
             -1,
-            device=translation.device,
-            dtype=translation.dtype,
-        ) / float(frames - 1)
-        age = age_values.view(1, frames, 1).expand(batch, -1, -1)
-    latest = translation.new_zeros(batch, frames, 1)
-    latest[:, -1] = 1.0
-    return torch.cat(
-        (rotation, normalized_extent, normalized_radius, age, latest),
-        dim=-1,
-    )
+            device=tokens.device,
+        )
+        tokens = (
+            tokens
+            + self.frame_age_embedding[frame_age][None, :, None, :]
+            + self.prefix_type_embedding[:prefix_count][None, None, :, :]
+        )
+        tokens = tokens.clone()
+        tokens[:, -1] = tokens[:, -1] + self.latest_reference_embedding
+        tokens = tokens.reshape(batch, frames * prefix_count, -1)
+        for block in self.blocks:
+            tokens = block(tokens)
+        tokens = self.output_norm(
+            tokens.reshape(batch, frames, prefix_count, -1)
+        )
+        camera_context = tokens[:, :, 0]
+        register_context = tokens.mean(dim=2)
+        return self.output_projection(
+            torch.cat((camera_context, register_context), dim=-1)
+        )
 
 
 def _vggt_unit_query_coordinates(
@@ -255,9 +307,9 @@ class VGGTUnitPixelRoutedBEVDecoder(nn.Module):
 
 
 class WTBDMergeScaleHead(nn.Module):
-    """No-Single Merged head plus an independent metric Scale Token."""
+    """Implicit multi-view Merged head plus an independent Scale Token."""
 
-    pipeline_id = "WTBD-MERGE-SCALE-NLL"
+    pipeline_id = "WTBD-IMPLICIT-MERGE-SCALE-NLL"
 
     def __init__(
         self,
@@ -271,13 +323,18 @@ class WTBDMergeScaleHead(nn.Module):
         decoder_layers: int = 2,
         scale_decoder_layers: int = 2,
         self_attention_mode: str = "linear",
-        cross_attention_mode: str = "deformable",
+        cross_attention_mode: str = "linear",
         deformable_samples: int = 4,
         cross_query_chunk_size: int = 4096,
         merged_latent_bev_size: int = 80,
         merged_output_size: int = 800,
         merged_extent_vggt: float = 6.5,
         predict_scale_uncertainty: bool = True,
+        implicit_geometry_hidden_dim: int = 256,
+        implicit_geometry_heads: int = 8,
+        implicit_geometry_layers: int = 4,
+        maximum_history: int = 10,
+        maximum_prefix_tokens: int = 17,
     ) -> None:
         super().__init__()
         if probability_model != "evidential":
@@ -296,11 +353,14 @@ class WTBDMergeScaleHead(nn.Module):
             *projector_args
         )
         self.scale_token_projector = MultiScaleTokenProjector(*projector_args)
-        self.native_geometry_embedding = nn.Sequential(
-            nn.LayerNorm(17),
-            nn.Linear(17, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.implicit_geometry_trunk = ImplicitGeometryContextTrunk(
+            input_dim=vggt_token_dim,
+            hidden_dim=implicit_geometry_hidden_dim,
+            output_dim=hidden_dim,
+            heads=implicit_geometry_heads,
+            layers=implicit_geometry_layers,
+            maximum_history=maximum_history,
+            maximum_prefix_tokens=maximum_prefix_tokens,
         )
         common = dict(
             hidden_dim=hidden_dim,
@@ -329,7 +389,6 @@ class WTBDMergeScaleHead(nn.Module):
     def forward(
         self,
         extraction: dict,
-        geometry: dict,
         *,
         include_merged: bool = True,
         include_scale: bool = True,
@@ -337,12 +396,11 @@ class WTBDMergeScaleHead(nn.Module):
     ) -> dict:
         output: dict = {}
         if include_merged:
-            geometry_features = relative_native_geometry_features(
-                geometry["estimated_camera_from_world_vggt"],
-                geometry["scene_radius_vggt"],
-                canonical_extent_vggt=self.merged_bev_decoder.extent_vggt,
+            if "camera_register_tokens" not in extraction:
+                raise KeyError("Merged head requires frozen aggregator prefix tokens")
+            frame_embedding = self.implicit_geometry_trunk(
+                extraction["camera_register_tokens"]
             )
-            frame_embedding = self.native_geometry_embedding(geometry_features)
             guessed = self.merged_guessed_token_projector(
                 extraction["tokens"],
                 extraction["patch_grid"],
@@ -386,15 +444,15 @@ class WTBDMergeScaleSystem(nn.Module):
     def decode_teacher_geometry(self, extraction: dict) -> dict:
         return self.adapter.decode_geometry(extraction)
 
-    def forward_head(self, extraction: dict, geometry: dict, **arguments) -> dict:
-        prediction = self.head(extraction, geometry, **arguments)
+    def forward_head(self, extraction: dict, **arguments) -> dict:
+        prediction = self.head(extraction, **arguments)
         head = self.unwrapped_head()
         return {
             **prediction,
             "pipeline_id": head.pipeline_id,
             "runtime_inputs": ("rgb_window",),
-            "internal_frozen_geometry": (
-                "VGGT depth/intrinsics/camera_from_world from the same window"
+            "merged_source": (
+                "frozen aggregator patch+camera/register tokens only"
             ),
             "coordinate_mode": "vggt_native_units",
             "merged_extent_vggt": head.merged_bev_decoder.extent_vggt,
@@ -402,10 +460,16 @@ class WTBDMergeScaleSystem(nn.Module):
             "scale_unit": "meter_per_vggt_runtime_unit",
             "scale_is_merged_input": False,
             "single_bev_present": False,
+            "relative_pose_head_present": False,
+            "extrinsic_input_present": False,
+            "bev_waits_for_geometry_heads": False,
+            "geometry_conditioning": (
+                "implicit_multiview_token_cross_attention"
+            ),
+            "maximum_history": head.implicit_geometry_trunk.maximum_history,
             "orientation": "latest ego centered; forward is image-up",
         }
 
     def forward(self, images: torch.Tensor) -> dict:
         extraction = self.extract(images)
-        geometry = self.decode_teacher_geometry(extraction)
-        return self.forward_head(extraction, geometry)
+        return self.forward_head(extraction)
