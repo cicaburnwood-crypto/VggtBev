@@ -346,3 +346,31 @@ class LiveVGGTOmegaAdapter(nn.Module):
             "coordinate_mode": "vggt_native_units",
             "normalization_unit": "scene_radius_vggt",
         }
+
+    def decode_scale_teacher(self, shared: dict) -> dict:
+        """Decode only depth/confidence for training-only metric scale labels.
+
+        The implicit WTBD Merged pipeline deliberately skips CameraHead:
+        intrinsics and extrinsics are neither needed for robust aligned-depth
+        scale targets nor permitted as Merged inputs.
+        """
+
+        images = shared["_images"]
+        aggregated = shared["_aggregated"]
+        patch_start = shared["_patch_start"]
+        with torch.no_grad():
+            with torch.autocast(
+                device_type=images.device.type,
+                enabled=False,
+            ):
+                depth, confidence = self.backbone.dense_head(
+                    aggregated,
+                    images=images,
+                    patch_token_start=patch_start,
+                )
+        dense_depth = depth[..., 0] if depth.ndim == 5 else depth
+        return {
+            "estimated_depth_vggt": dense_depth.detach(),
+            "estimated_depth_confidence": confidence.detach(),
+            "teacher_source": "frozen VGGT depth head only",
+        }

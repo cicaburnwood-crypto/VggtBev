@@ -441,8 +441,8 @@ class WTBDMergeScaleSystem(nn.Module):
     def extract(self, images: torch.Tensor) -> dict:
         return self.adapter.aggregate(images)
 
-    def decode_teacher_geometry(self, extraction: dict) -> dict:
-        return self.adapter.decode_geometry(extraction)
+    def decode_scale_teacher(self, extraction: dict) -> dict:
+        return self.adapter.decode_scale_teacher(extraction)
 
     def forward_head(self, extraction: dict, **arguments) -> dict:
         prediction = self.head(extraction, **arguments)

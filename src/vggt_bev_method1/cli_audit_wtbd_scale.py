@@ -110,7 +110,7 @@ def main() -> None:
         attempted += 1
         batch = move_batch(batch, device)
         extraction = model.extract(batch["images"])
-        geometry = model.decode_teacher_geometry(extraction)
+        geometry = model.decode_scale_teacher(extraction)
         target = _build_scale_target(batch, geometry, scale_fit_config(config))
         valid = target["target_valid"]
         if bool(valid.any()):

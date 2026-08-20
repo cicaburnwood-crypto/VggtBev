@@ -49,6 +49,8 @@ Existing data is reused. Stored Merged GT remains a 10 m, latest-ego metric
 raster. Frozen VGGT depth and metric GT depth produce the robust training
 label `lambda* = metre / VGGT unit`. This teacher geometry is used only to
 construct targets and validate scale; it is never passed to the Merged head.
+The scale teacher runs only VGGT's frozen depth head; CameraHead, intrinsics
+and extrinsics are not decoded by this pipeline.
 
 For canonical target coordinate `(x_V,z_V)`, target lookup is:
 

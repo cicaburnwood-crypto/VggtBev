@@ -167,7 +167,7 @@ def _forward_losses(
     # A separate no-grad teacher branch exists only to build lambda* labels
     # for target-coordinate conversion and Scale Token supervision. Running
     # it first lowers peak VRAM; it is not an input dependency of the head.
-    scale_teacher_geometry = model.decode_teacher_geometry(extraction)
+    scale_teacher_geometry = model.decode_scale_teacher(extraction)
     scale_target = _build_scale_target(
         batch,
         scale_teacher_geometry,
@@ -310,7 +310,6 @@ def _save_checkpoint(
                 ],
                 "training_only_teacher_predictions": [
                     "VGGT depth/confidence for lambda target construction",
-                    "VGGT camera/intrinsics for aligned scale diagnostics",
                 ],
                 "outputs": [
                     "Merged evidential BEV in VGGT units",
