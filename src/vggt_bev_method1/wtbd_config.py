@@ -51,10 +51,12 @@ def validate_wtbd_config(config: dict[str, Any]) -> None:
         raise ValueError("data.coordinate_mode must be metric_source_to_vggt_units")
     if str(data.get("supervision")) != "metric_fov_complete_evidential":
         raise ValueError("existing FOV-complete Merged data contract is required")
-    if int(data.get("maximum_history", 0)) != 10:
-        raise ValueError("WTBD v2 maximum_history must be exactly 10")
-    if int(data.get("minimum_history", 0)) != 10:
-        raise ValueError("WTBD v2 trains on complete 10-frame windows")
+    if int(data.get("maximum_history", 0)) > 10:
+        raise ValueError("WTBD v2 maximum_history must not exceed 10")
+    if int(data.get("minimum_history", 0)) < 1:
+        raise ValueError("WTBD v2 minimum_history must be positive")
+    if int(data["minimum_history"]) > int(data["maximum_history"]):
+        raise ValueError("minimum_history cannot exceed maximum_history")
     if float(data.get("merged_source_extent_m", 0.0)) != 10.0:
         raise ValueError("existing Merged source GT must remain 10 m")
     if int(data.get("merged_source_output_size", 0)) != 800:
