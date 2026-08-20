@@ -164,14 +164,22 @@ def _forward_losses(
     stage = str(config["training"]["stage"])
     training = config["training"]
     extraction = model.extract(batch["images"])
-    geometry = model.decode_teacher_geometry(extraction)
+    # A separate no-grad teacher branch exists only to build lambda* labels
+    # for target-coordinate conversion and Scale Token supervision. Running
+    # it first lowers peak VRAM; it is not an input dependency of the head.
+    scale_teacher_geometry = model.decode_teacher_geometry(extraction)
+    scale_target = _build_scale_target(
+        batch,
+        scale_teacher_geometry,
+        scale_fit_config(config),
+    )
+    # The deployable task path branches directly from frozen aggregator tokens.
     prediction = model.forward_head(
         extraction,
         include_merged=stage in ("merged_only", "joint"),
         include_scale=stage in ("scale_only", "joint"),
         assemble_runtime_outputs=False,
     )
-    scale_target = _build_scale_target(batch, geometry, scale_fit_config(config))
     zero = batch["images"].new_zeros((), dtype=torch.float32)
     values: dict[str, torch.Tensor] = {}
 
