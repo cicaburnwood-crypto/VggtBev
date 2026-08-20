@@ -5,7 +5,7 @@ Version: `wtbd-merge-only-implicit-geometry-cross-attention-scale-v2`
 ## Architecture contract
 
 ```text
-RGB window (1..10 ordered frames)
+RGB window (10 ordered frames)
                     |
                     v
           Frozen VGGT Aggregator (one pass)
@@ -74,7 +74,7 @@ branch's loss can train the other branch.
 ## Runtime contract
 
 ```text
-input:  ordered RGB window, at most 10 frames
+input:  ordered 10-frame RGB sliding window
 output: Merged occupancy/evidence/confidence in VGGT-unit grid
         lambda_hat in metre/VGGT-unit
 ```
