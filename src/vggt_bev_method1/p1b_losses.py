@@ -13,6 +13,8 @@ from vggt_bev_method1.models.p1b_probability import ProbabilityModel
 @dataclass(frozen=True)
 class P1BLossWeights:
     observed_gate_pixel: float = 1.0
+    observed_gate_region: float = 0.0
+    observed_gate_boundary_emphasis: float = 0.0
     guessed_pixel: float = 1.0
     guessed_surface: float = 0.5
     guessed_free: float = 0.35
@@ -21,6 +23,28 @@ class P1BLossWeights:
     wrong_evidence_kl: float = 0.005
     support_bce: float = 0.5
     support_dice: float = 0.5
+    support_boundary_emphasis: float = 0.0
+    boundary_sigma: float = 3.0
+
+    def __post_init__(self) -> None:
+        nonnegative = (
+            self.observed_gate_pixel,
+            self.observed_gate_region,
+            self.observed_gate_boundary_emphasis,
+            self.guessed_pixel,
+            self.guessed_surface,
+            self.guessed_free,
+            self.guessed_visible_surface,
+            self.guessed_hidden_occupied,
+            self.wrong_evidence_kl,
+            self.support_bce,
+            self.support_dice,
+            self.support_boundary_emphasis,
+        )
+        if any(value < 0.0 for value in nonnegative):
+            raise ValueError("P1B loss weights cannot be negative")
+        if self.boundary_sigma <= 0.0:
+            raise ValueError("boundary sigma must be positive")
 
 
 DEFAULT_P1B_LOSS_WEIGHTS = P1BLossWeights()
@@ -76,6 +100,64 @@ def _binary_boundary_band(
     return (_binary_dilate(mask, radius) ^ _binary_erode(mask, radius)) & (
         stable_domain
     )
+
+
+def _gaussian_boundary_weight(
+    truth: torch.Tensor,
+    domain: torch.Tensor,
+    *,
+    emphasis: float,
+    sigma: float,
+) -> torch.Tensor:
+    """Build one continuous, nonlinear weight field around a GT boundary.
+
+    The minimum in-domain weight is one.  At the boundary the weight approaches
+    ``1 + emphasis`` and then decays as a Gaussian on both sides.  This is only
+    a target-derived weighting of the original pixelwise objective; it is not
+    an independently normalized edge loss and creates no new model output.
+    """
+
+    if truth.shape != domain.shape:
+        raise ValueError("boundary truth and domain must align")
+    if emphasis < 0.0:
+        raise ValueError("boundary emphasis cannot be negative")
+    if sigma <= 0.0:
+        raise ValueError("boundary sigma must be positive")
+    domain = domain.bool()
+    base = domain.to(torch.float32)
+    if emphasis == 0.0:
+        return base
+
+    # A one-cell target contour is diffused by a separable Gaussian.  Unlike a
+    # fixed-width band, every transition in the resulting weight field is
+    # continuous and no pixel is abruptly assigned to another loss group.
+    contour = _binary_boundary_band(truth.bool(), 1, domain).to(torch.float32)
+    radius = max(int(3.0 * float(sigma) + 0.5), 1)
+    coordinates = torch.arange(
+        -radius,
+        radius + 1,
+        device=truth.device,
+        dtype=torch.float32,
+    )
+    kernel = torch.exp(-0.5 * (coordinates / float(sigma)).square())
+    kernel = kernel / kernel.sum()
+    influence = F.conv2d(
+        contour.unsqueeze(1),
+        kernel.view(1, 1, 1, -1),
+        padding=(0, radius),
+    )
+    influence = F.conv2d(
+        influence,
+        kernel.view(1, 1, -1, 1),
+        padding=(radius, 0),
+    ).squeeze(1)
+    peak = influence.flatten(1).amax(dim=1).view(-1, 1, 1)
+    influence = torch.where(
+        peak > 0,
+        influence / peak.clamp_min(torch.finfo(influence.dtype).eps),
+        torch.zeros_like(influence),
+    )
+    return base * (1.0 + float(emphasis) * influence)
 
 
 def _soft_region_dice(
@@ -609,11 +691,26 @@ def _class_balanced_binary_bce(
     logit: torch.Tensor,
     positive: torch.Tensor,
     negative: torch.Tensor,
+    *,
+    spatial_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Per-pixel Gate BCE balanced only across its two original classes."""
 
     if not (logit.shape == positive.shape == negative.shape):
         raise ValueError("binary Gate logits and masks must align")
+    if spatial_weight is None:
+        spatial_weight = torch.ones_like(logit, dtype=torch.float32)
+    elif spatial_weight.shape != logit.shape:
+        raise ValueError("binary BCE spatial weights and logits must align")
+    spatial_weight = spatial_weight.to(device=logit.device, dtype=torch.float32)
+    nonnegative = ~(spatial_weight < 0).any()
+    if nonnegative.device.type == "cuda":
+        torch._assert_async(
+            nonnegative,
+            "binary BCE spatial weights cannot be negative",
+        )
+    elif not bool(nonnegative):
+        raise ValueError("binary BCE spatial weights cannot be negative")
     _assert_no_overlap(
         positive & negative,
         "binary Gate positive and negative masks overlap",
@@ -625,6 +722,7 @@ def _class_balanced_binary_bce(
     class_masks = torch.stack((negative, positive), dim=1)
     flat_bce = pixel_bce.flatten(1)
     flat_masks = class_masks.flatten(2).to(pixel_bce.dtype)
+    flat_masks = flat_masks * spatial_weight.flatten(1).unsqueeze(1)
     denominators = flat_masks.sum(dim=2)
     present = denominators > 0
     per_class_per_sample = (
@@ -638,8 +736,14 @@ def _class_balanced_binary_bce(
     balanced = (per_sample * available_weight).sum() / available_weight.sum().clamp_min(
         1.0
     )
-    negative_loss = _per_sample_masked_mean(pixel_bce, negative)
-    positive_loss = _per_sample_masked_mean(pixel_bce, positive)
+    negative_present = present[:, 0].to(pixel_bce.dtype)
+    positive_present = present[:, 1].to(pixel_bce.dtype)
+    negative_loss = (
+        per_class_per_sample[:, 0] * negative_present
+    ).sum() / negative_present.sum().clamp_min(1.0)
+    positive_loss = (
+        per_class_per_sample[:, 1] * positive_present
+    ).sum() / positive_present.sum().clamp_min(1.0)
     return balanced, negative_loss, positive_loss
 
 
@@ -726,14 +830,33 @@ def p1b_bev_loss(
         * wrong_evidence
     )
 
+    gate_domain = masks.valid & gt_valid
+    gate_boundary_weight = _gaussian_boundary_weight(
+        masks.observed_free,
+        gate_domain,
+        emphasis=weights.observed_gate_boundary_emphasis,
+        sigma=weights.boundary_sigma,
+    )
     observed_gate_bce, observed_guessed_bce, observed_free_bce = (
         _class_balanced_binary_bce(
             prediction["observed_gate_logit"].float(),
             valid_observed_free,
             valid_guessed,
+            spatial_weight=gate_boundary_weight,
         )
     )
-    routing_loss = weights.observed_gate_pixel * observed_gate_bce
+    observed_gate_probability = torch.sigmoid(
+        prediction["observed_gate_logit"].float()
+    )
+    gate_region_dice = _soft_region_dice(
+        observed_gate_probability,
+        masks.observed_free,
+        gate_domain,
+    )
+    routing_loss = (
+        weights.observed_gate_pixel * observed_gate_bce
+        + weights.observed_gate_region * gate_region_dice
+    )
 
     # Surface emphasis belongs exclusively to the Guessed Expert.  The Gate
     # still learns that these cells are not observed-free through its original
@@ -749,20 +872,18 @@ def p1b_bev_loss(
 
     support_logit = prediction["fov_support_logit"].float()
     support_truth = masks.valid.to(support_logit.dtype)
-    support_bce_map = F.binary_cross_entropy_with_logits(
+    support_boundary_weight = _gaussian_boundary_weight(
+        masks.valid,
+        gt_valid,
+        emphasis=weights.support_boundary_emphasis,
+        sigma=weights.boundary_sigma,
+    )
+    support_bce, outside_bce, inside_bce = _class_balanced_binary_bce(
         support_logit,
-        support_truth,
-        reduction="none",
-    )
-    inside_bce = _per_sample_masked_mean(
-        support_bce_map,
         masks.valid & gt_valid,
-    )
-    outside_bce = _per_sample_masked_mean(
-        support_bce_map,
         ~masks.valid & gt_valid,
+        spatial_weight=support_boundary_weight,
     )
-    support_bce = 0.5 * (inside_bce + outside_bce)
     support_probability = prediction["fov_support_probability"].float()
     support_loss_domain = gt_valid.to(support_probability.dtype)
     support_probability_for_loss = support_probability * support_loss_domain
@@ -776,8 +897,9 @@ def p1b_bev_loss(
         + support_truth_for_loss.sum()
         + 1.0
     )
-    support_loss = weights.support_bce * support_bce + (
-        weights.support_dice * support_dice
+    support_loss = (
+        weights.support_bce * support_bce
+        + weights.support_dice * support_dice
     )
 
     total = routing_loss + guessed_loss + guessed_surface_objective + support_loss
@@ -790,6 +912,12 @@ def p1b_bev_loss(
         "observed_gate_pixel_bce": observed_gate_bce,
         "observed_gate_guessed_bce": observed_guessed_bce,
         "observed_gate_free_bce": observed_free_bce,
+        "observed_gate_region_dice": gate_region_dice,
+        "observed_gate_boundary_weight_mean": _per_sample_masked_mean(
+            gate_boundary_weight,
+            gate_domain,
+        ),
+        "observed_gate_boundary_weight_max": gate_boundary_weight.amax(),
         "guessed_pixel_loss": guessed_pixel_loss,
         "guessed_free_pixel_loss": guessed_free_pixel_loss,
         "visible_surface_occupied_pixel_loss": visible_surface_occupied_pixel_loss,
@@ -806,7 +934,14 @@ def p1b_bev_loss(
             float(hidden_occupied_scale), device=complete_target.device
         ),
         "support_bce_loss": support_bce,
+        "support_inside_bce_loss": inside_bce,
+        "support_outside_bce_loss": outside_bce,
         "support_dice_loss": support_dice,
+        "support_boundary_weight_mean": _per_sample_masked_mean(
+            support_boundary_weight,
+            gt_valid,
+        ),
+        "support_boundary_weight_max": support_boundary_weight.amax(),
         "observed_free_fraction": masks.observed_free.float().mean(),
         "visible_surface_fraction": masks.visible_surface.float().mean(),
         "guessed_fraction": masks.guessed.float().mean(),

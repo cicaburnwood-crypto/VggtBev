@@ -24,13 +24,17 @@ from vggt_bev_method1.data.vggt_unit_targets import (
 )
 from vggt_bev_method1.models import (
     LiveVGGTOmegaAdapter,
-    WTBDMergeScaleSystem,
+    P1DSystem,
     metric_scale_losses,
 )
+from vggt_bev_method1.p1d_losses import (
+    P1DAdditionalLossWeights,
+    p1d_bev_loss,
+)
+from vggt_bev_method1.p1d_metrics import p1d_validation_metrics
 from vggt_bev_method1.p1b_losses import (
     P1BLossWeights,
     hidden_occupied_supervision_weight,
-    p1b_bev_loss,
     wrong_evidence_kl_weight,
 )
 from vggt_bev_method1.train_utils import (
@@ -42,20 +46,20 @@ from vggt_bev_method1.training_state import (
     EpochOffsetSampler,
     StratifiedValidationSampler,
 )
-from vggt_bev_method1.wtbd_config import (
+from vggt_bev_method1.p1d_config import (
     CHECKPOINT_SCHEMA,
     PIPELINE_ID,
-    load_wtbd_config,
+    load_p1d_config,
 )
-from vggt_bev_method1.wtbd_train_utils import (
-    build_wtbd_datasets,
-    wtbd_collate,
+from vggt_bev_method1.p1d_train_utils import (
+    build_p1d_datasets,
+    p1d_collate,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train the standalone WTBD Merged + metric Scale pipeline"
+        description="Train the direct P1D Merged + evidence + Scale pipeline"
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data-only", action="store_true")
@@ -64,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume",
         type=Path,
-        help="Resume only a checkpoint created by this exact WTBD schema.",
+        help="Resume only a checkpoint created by this exact P1D schema.",
     )
     return parser.parse_args()
 
@@ -77,7 +81,7 @@ def _sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def build_model(config: dict, device: torch.device) -> WTBDMergeScaleSystem:
+def build_model(config: dict, device: torch.device) -> P1DSystem:
     values = config["model"]
     layers = tuple(int(value) for value in values["cached_layers"])
     adapter = LiveVGGTOmegaAdapter(
@@ -87,7 +91,7 @@ def build_model(config: dict, device: torch.device) -> WTBDMergeScaleSystem:
         patch_size=int(values["patch_size"]),
         cached_layers=layers,
     )
-    return WTBDMergeScaleSystem(
+    return P1DSystem(
         adapter,
         probability_model="evidential",
         cached_layers=layers,
@@ -114,26 +118,27 @@ def build_model(config: dict, device: torch.device) -> WTBDMergeScaleSystem:
         implicit_geometry_layers=int(values["implicit_geometry_layers"]),
         maximum_history=int(values["maximum_history"]),
         maximum_prefix_tokens=int(values["maximum_prefix_tokens"]),
+        frame_reliability_hidden_dim=int(
+            values["frame_reliability_hidden_dim"]
+        ),
+        frame_reliability_minimum=float(
+            values["frame_reliability_minimum"]
+        ),
+        frame_reliability_maximum=float(
+            values["frame_reliability_maximum"]
+        ),
+        training_frame_dropout_probability=float(
+            values["training_frame_dropout_probability"]
+        ),
     ).to(device)
 
 
-def _set_stage(model: WTBDMergeScaleSystem, stage: str) -> None:
+def _set_stage(model: P1DSystem, stage: str) -> None:
+    if stage != "joint":
+        raise ValueError("P1D trains every parallel output jointly")
     head = model.unwrapped_head()
     for parameter in head.parameters():
-        parameter.requires_grad_(False)
-    if stage in ("merged_only", "joint"):
-        for module in (
-            head.implicit_geometry_trunk,
-            head.merged_guessed_token_projector,
-            head.merged_routing_token_projector,
-            head.merged_bev_decoder,
-        ):
-            for parameter in module.parameters():
-                parameter.requires_grad_(True)
-    if stage in ("scale_only", "joint"):
-        for module in (head.scale_token_projector, head.scale_decoder):
-            for parameter in module.parameters():
-                parameter.requires_grad_(True)
+        parameter.requires_grad_(True)
 
 
 def _bev_weights(training: dict) -> P1BLossWeights:
@@ -164,13 +169,28 @@ def _bev_weights(training: dict) -> P1BLossWeights:
     )
 
 
+def _additional_bev_weights(training: dict) -> P1DAdditionalLossWeights:
+    return P1DAdditionalLossWeights(
+        history_observed_gate=float(training["history_observed_gate_weight"]),
+        history_support=float(training["history_support_weight"]),
+        history_guessed=float(training["history_guessed_weight"]),
+        guessed_hard_pixel=float(training["guessed_hard_pixel_weight"]),
+        guessed_hard_fraction=float(training["guessed_hard_fraction"]),
+        guessed_hard_minimum=int(training["guessed_hard_minimum"]),
+        guessed_hard_maximum_per_group=int(
+            training["guessed_hard_maximum_per_group"]
+        ),
+    )
+
+
 def _forward_losses(
-    model: WTBDMergeScaleSystem,
+    model: P1DSystem,
     batch: dict,
     config: dict,
     *,
     global_step: int,
     total_steps: int,
+    include_validation_metrics: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     stage = str(config["training"]["stage"])
     training = config["training"]
@@ -208,14 +228,14 @@ def _forward_losses(
     # The deployable task path branches directly from frozen aggregator tokens.
     prediction = model.forward_head(
         extraction,
-        include_merged=stage in ("merged_only", "joint"),
-        include_scale=stage in ("scale_only", "joint"),
+        include_merged=True,
+        include_scale=True,
         assemble_runtime_outputs=False,
     )
     zero = batch["images"].new_zeros((), dtype=torch.float32)
     values: dict[str, torch.Tensor] = {}
 
-    if stage in ("merged_only", "joint"):
+    if stage == "joint":
         targets = regrid_merged_metric_targets_to_vggt_units(
             batch["merged_fov_complete_target"],
             batch["merged_visible_target"],
@@ -226,6 +246,10 @@ def _forward_losses(
             source_extent_m=float(config["data"]["merged_source_extent_m"]),
             target_extent_vggt=float(config["model"]["merged_bev_extent_vggt"]),
             target_size=int(config["model"]["merged_bev_output_size"]),
+            latest_observed_free_metric=batch[
+                "latest_observed_free_target"
+            ],
+            latest_support_metric=batch["latest_fov_support_target"],
         )
         wrong_scale = wrong_evidence_kl_weight(
             global_step,
@@ -240,14 +264,19 @@ def _forward_losses(
             zero_fraction=float(training["hidden_occupied_zero_fraction"]),
             ramp_fraction=float(training["hidden_occupied_ramp_fraction"]),
         )
-        bev = p1b_bev_loss(
+        bev = p1d_bev_loss(
             prediction["merged_bev"],
             targets["complete_target"],
             targets["visible_target"],
             targets["support_target"],
+            latest_observed_free_target=targets[
+                "latest_observed_free_target"
+            ],
+            latest_support_target=targets["latest_support_target"],
             gt_valid_mask=targets["gt_valid_mask"],
             probability_model="evidential",
-            weights=_bev_weights(training),
+            base_weights=_bev_weights(training),
+            additional_weights=_additional_bev_weights(training),
             wrong_evidence_scale=wrong_scale,
             hidden_occupied_scale=hidden_scale,
         )
@@ -258,11 +287,26 @@ def _forward_losses(
         values["target_effective_metric_extent_gt"] = targets[
             "effective_metric_extent_gt"
         ].mean()
+        if include_validation_metrics:
+            boundary_metrics = p1d_validation_metrics(
+                prediction["merged_bev"],
+                targets["complete_target"],
+                targets["visible_target"],
+                targets["support_target"],
+                latest_observed_free_target=targets[
+                    "latest_observed_free_target"
+                ],
+                latest_support_target=targets["latest_support_target"],
+                gt_valid_mask=targets["gt_valid_mask"],
+            )
+            values.update(
+                {f"merged_{key}": value for key, value in boundary_metrics.items()}
+            )
         bev_loss = bev["loss"]
     else:
         bev_loss = zero
 
-    if stage in ("scale_only", "joint"):
+    if stage == "joint":
         scale = metric_scale_losses(prediction["scale"], scale_target)
         values.update({f"scale_{key}": value for key, value in scale.items()})
         scale_loss = scale["scale"]
@@ -282,6 +326,21 @@ def _forward_losses(
         * uncertainty_loss
     )
     values["loss"] = total
+    values["frame_reliability_mean"] = prediction[
+        "frame_reliability"
+    ].float().mean()
+    values["frame_reliability_std"] = prediction[
+        "frame_reliability"
+    ].float().std(unbiased=False)
+    values["frame_reliability_min"] = prediction[
+        "frame_reliability"
+    ].float().amin()
+    values["frame_reliability_max"] = prediction[
+        "frame_reliability"
+    ].float().amax()
+    values["training_frame_keep_fraction"] = prediction[
+        "frame_keep_mask"
+    ].float().mean()
     return total, values
 
 
@@ -300,10 +359,13 @@ def _contract(config: dict, manifest_sha256: str, vggt_sha256: str) -> dict:
         "scale_unit": "meter_per_vggt_runtime_unit",
         "scale_is_merged_input": False,
         "geometry_conditioning": (
-            "implicit_multiview_token_cross_attention"
+            "implicit_temporal_cross_attention_with_learned_reliability"
         ),
         "extrinsic_input_present": False,
         "bev_waits_for_geometry_heads": False,
+        "learned_frame_reliability": True,
+        "runtime_postprocessing_present": False,
+        "runtime_passes": 1,
         "runtime_external_inputs": ["rgb_window"],
     }
 
@@ -311,7 +373,7 @@ def _contract(config: dict, manifest_sha256: str, vggt_sha256: str) -> dict:
 def _save_checkpoint(
     path: Path,
     *,
-    model: WTBDMergeScaleSystem,
+    model: P1DSystem,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     config: dict,
@@ -333,7 +395,13 @@ def _save_checkpoint(
             "head": model.unwrapped_head().state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
-            "trained_outputs": ["merged_bev_vggt_units", "scale_m_per_vggt"],
+            "trained_outputs": [
+                "merged_bev_vggt_units",
+                "merged_confidence",
+                "fov_support",
+                "observed_gate",
+                "scale_m_per_vggt",
+            ],
             "runtime_contract": {
                 "input": ["RGB frames"],
                 "internal_frozen_predictions": [
@@ -345,6 +413,8 @@ def _save_checkpoint(
                 ],
                 "outputs": [
                     "Merged evidential BEV in VGGT units",
+                    "FOV support and observed gate",
+                    "pixelwise navigation confidence",
                     "lambda_hat in meter/VGGT-unit",
                 ],
                 "metric_restoration": "x_m = lambda_hat * x_vggt",
@@ -360,7 +430,7 @@ def _save_checkpoint(
 def _load_checkpoint(
     path: Path,
     *,
-    model: WTBDMergeScaleSystem,
+    model: P1DSystem,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     contract: dict,
@@ -381,7 +451,7 @@ def _load_checkpoint(
 
 @torch.no_grad()
 def _validate(
-    model: WTBDMergeScaleSystem,
+    model: P1DSystem,
     loader: DataLoader,
     config: dict,
     device: torch.device,
@@ -400,6 +470,7 @@ def _validate(
             config,
             global_step=global_step,
             total_steps=total_steps,
+            include_validation_metrics=True,
         )
         for key, value in values.items():
             totals[key] = totals.get(key, 0.0) + float(value.detach().cpu())
@@ -420,10 +491,10 @@ def _validate(
 
 def main() -> None:
     arguments = parse_args()
-    config = load_wtbd_config(arguments.config)
+    config = load_p1d_config(arguments.config)
     training = config["training"]
     seed_everything(int(training["seed"]))
-    train_dataset, validation_dataset = build_wtbd_datasets(config)
+    train_dataset, validation_dataset = build_p1d_datasets(config)
     if arguments.data_only:
         print(
             json.dumps(
@@ -431,7 +502,8 @@ def main() -> None:
                     "pipeline": PIPELINE_ID,
                     "train_samples": len(train_dataset),
                     "validation_samples": len(validation_dataset),
-                    "single_targets_loaded": False,
+                    "single_prediction_targets_loaded": False,
+                    "latest_masked_gt_loaded_for_history_loss": True,
                     "source_gt": "10m metric Merged only",
                     "runtime_external_inputs": ["rgb_window"],
                 },
@@ -460,7 +532,7 @@ def main() -> None:
         if parameter.requires_grad
     ]
     if any(name.startswith("single_") for name in trainable_names):
-        raise RuntimeError("WTBD unexpectedly contains Single parameters")
+        raise RuntimeError("P1D unexpectedly contains Single parameters")
     optimizer = torch.optim.AdamW(
         trainable,
         lr=float(training["learning_rate"]),
@@ -489,7 +561,7 @@ def main() -> None:
         sampler=sampler,
         num_workers=workers,
         pin_memory=device.type == "cuda",
-        collate_fn=wtbd_collate,
+        collate_fn=p1d_collate,
         **worker_options,
     )
     validation_loader = DataLoader(
@@ -504,7 +576,7 @@ def main() -> None:
         ),
         num_workers=workers,
         pin_memory=device.type == "cuda",
-        collate_fn=wtbd_collate,
+        collate_fn=p1d_collate,
         **worker_options,
     )
     total_steps = max(1, len(loader) * int(training["epochs"]))
@@ -541,6 +613,10 @@ def main() -> None:
                         {name.split(".", 1)[0] for name in trainable_names}
                     ),
                     "vggt_runs_per_batch": 1,
+                    "runtime_forward_passes": 1,
+                    "training_frame_dropout": float(
+                        config["model"]["training_frame_dropout_probability"]
+                    ),
                     "fresh_heads": arguments.resume is None,
                     "head_compilation": compilation,
                 }
@@ -598,7 +674,7 @@ def main() -> None:
                 )
             if primary and global_step % int(training["checkpoint_every_steps"]) == 0:
                 _save_checkpoint(
-                    output_dir / f"wtbd_step_{global_step:08d}.pt",
+                    output_dir / f"p1d_step_{global_step:08d}.pt",
                     model=model,
                     optimizer=optimizer,
                     scheduler=scheduler,
@@ -625,7 +701,7 @@ def main() -> None:
                 print(json.dumps({"epoch": epoch + 1, "validation": metrics}), flush=True)
         if primary:
             _save_checkpoint(
-                output_dir / "wtbd_latest.pt",
+                output_dir / "p1d_latest.pt",
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,

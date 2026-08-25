@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "odineye-wtbd-merge-scale"
-version = "1.0.0"
-description = "Merge-only VGGT-unit evidential BEV plus parallel metric scale"
+name = "odineye-p1d-direct-merged-scale"
+version = "1.1.0"
+description = "Direct temporal Merged BEV, evidence and scale from frozen VGGT tokens"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
@@ -27,6 +27,8 @@ odineye-p1b-void-audit = "p1b_void_audit.cli:main"
 odineye-p1b-single-astar = "vggt_bev_method1.cli_realtime_astar:main"
 odineye-wtbd-train = "vggt_bev_method1.cli_train_wtbd:main"
 odineye-wtbd-scale-audit = "vggt_bev_method1.cli_audit_wtbd_scale:main"
+odineye-p1d-train = "vggt_bev_method1.cli_train_p1d:main"
+odineye-p1d-eval = "vggt_bev_method1.cli_eval_p1d:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

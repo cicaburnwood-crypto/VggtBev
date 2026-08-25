@@ -1,4 +1,42 @@
-# WTBD Merge-Scale
+# P1D Direct Merged BEV
+
+P1D is the successor to P1C/WTBD. It is one differentiable, single-forward
+runtime path:
+
+```text
+RGB window -> frozen VGGT aggregator -> shared temporal tokens
+           -> one parallel P1D head -> Merged BEV + confidence + scale
+```
+
+The head jointly predicts FOV support, Observed Gate, Guessed occupied/free
+Beta evidence, and metre-per-VGGT-unit Scale. Learned bounded frame
+reliability modulates internal Cross-Attention. There is no Single BEV input,
+extrinsic/pose input, camera-height input, per-frame warp, overwrite, semantic
+fusion, or runtime morphology.
+
+Training additionally uses the existing latest-frame masked GT to emphasize
+history-only regions, the same evidential NLL for bounded hard-pixel mining,
+continuous Gate/FOV boundary weights, and history-frame token dropout. These
+targets and sampling rules disappear at runtime.
+
+See `P1D_DIRECT_PIPELINE.md` for the exact I/O, loss and scale contract.
+
+## P1D quick start
+
+```bash
+python -m pip install --no-deps -e .
+pytest -q tests/test_p1d.py tests/test_p1b.py
+python -m vggt_bev_method1.cli_train_p1d \
+  --config configs/p1d_direct_merged_scale_template.toml \
+  --data-only
+GPU_COUNT=4 CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  scripts/train_p1d.sh configs/p1d_direct_merged_scale_template.toml
+```
+
+The former WTBD commands remain below for reproducibility; P1D does not delete
+or rewrite them.
+
+## Legacy WTBD Merge-Scale
 
 Standalone training pipeline for a frozen-VGGT extension with two outputs:
 

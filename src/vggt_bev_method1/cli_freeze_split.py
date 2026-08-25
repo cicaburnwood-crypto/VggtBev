@@ -12,6 +12,10 @@ except ModuleNotFoundError:
 from vggt_bev_method1.config import load_config
 from vggt_bev_method1.data.manifest import create_split_manifest
 from vggt_bev_method1.p1b_config import load_p1b_config
+from vggt_bev_method1.p1d_config import PIPELINE_ID as P1D_PIPELINE_ID
+from vggt_bev_method1.p1d_config import load_p1d_config
+from vggt_bev_method1.wtbd_config import PIPELINE_ID as WTBD_PIPELINE_ID
+from vggt_bev_method1.wtbd_config import load_wtbd_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +57,10 @@ def load_split_config(path: str | Path) -> dict:
     pipeline = str(raw.get("training", {}).get("pipeline", ""))
     if pipeline in ("P1B-NLL", "P1B-BCE", "P1C-NLL"):
         return load_p1b_config(resolved)
+    if pipeline == WTBD_PIPELINE_ID:
+        return load_wtbd_config(resolved)
+    if pipeline == P1D_PIPELINE_ID:
+        return load_p1d_config(resolved)
     return load_config(resolved)
 
 

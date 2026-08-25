@@ -84,7 +84,12 @@ class ImplicitGeometryContextTrunk(nn.Module):
         nn.init.normal_(self.prefix_type_embedding, std=0.02)
         nn.init.normal_(self.latest_reference_embedding, std=0.02)
 
-    def forward(self, prefix_tokens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        prefix_tokens: torch.Tensor,
+        *,
+        frame_reliability: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if prefix_tokens.ndim != 4:
             raise ValueError("camera/register tokens must have shape [B,N,P,C]")
         batch, frames, prefix_count, _ = prefix_tokens.shape
@@ -107,8 +112,24 @@ class ImplicitGeometryContextTrunk(nn.Module):
         tokens = tokens.clone()
         tokens[:, -1] = tokens[:, -1] + self.latest_reference_embedding
         tokens = tokens.reshape(batch, frames * prefix_count, -1)
+        prefix_reliability = None
+        if frame_reliability is not None:
+            if frame_reliability.shape != (batch, frames):
+                raise ValueError(
+                    "frame_reliability must have shape [B,N]"
+                )
+            prefix_reliability = frame_reliability.repeat_interleave(
+                prefix_count,
+                dim=1,
+            )
         for block in self.blocks:
-            tokens = block(tokens)
+            normalized = block.attention_norm(tokens)
+            tokens = tokens + block.attention(
+                normalized,
+                normalized,
+                prefix_reliability,
+            )
+            tokens = tokens + block.ffn(block.ffn_norm(tokens))
         tokens = self.output_norm(
             tokens.reshape(batch, frames, prefix_count, -1)
         )
@@ -198,7 +219,12 @@ class DenseVGGTUnitQueryDecoder(nn.Module):
         )
         nn.init.normal_(self.query_content, std=0.02)
 
-    def forward(self, pyramid: list[torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self,
+        pyramid: list[torch.Tensor],
+        *,
+        frame_reliability: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         batch = pyramid[0].shape[0]
         position = self.coordinate_position(
             self.coordinates_vggt.to(dtype=self.query_content.dtype)
@@ -217,8 +243,34 @@ class DenseVGGTUnitQueryDecoder(nn.Module):
                 ],
                 dim=1,
             )
+        context_weight = None
+        if frame_reliability is not None:
+            frames = pyramid[0].shape[1]
+            if frame_reliability.shape != (batch, frames):
+                raise ValueError(
+                    "frame_reliability must have shape [B,N]"
+                )
+            if self.blocks[0].cross_attention_mode != "linear":
+                raise ValueError(
+                    "frame reliability requires global linear cross-attention"
+                )
+            context_weight = torch.cat(
+                [
+                    frame_reliability.repeat_interleave(
+                        level.shape[-2] * level.shape[-1],
+                        dim=1,
+                    )
+                    for level in pyramid
+                ],
+                dim=1,
+            )
         for block in self.blocks:
-            query = block(query, context, self.reference_grid)
+            query = block(
+                query,
+                context,
+                self.reference_grid,
+                context_weight=context_weight,
+            )
         latent = self.output_norm(query).transpose(1, 2).reshape(
             batch, -1, self.latent_size, self.latent_size
         )
@@ -255,13 +307,20 @@ class VGGTUnitPixelRoutedBEVDecoder(nn.Module):
         routing_pyramid: list[torch.Tensor],
         *,
         assemble_runtime_outputs: bool = True,
+        frame_reliability: torch.Tensor | None = None,
     ) -> dict:
         guessed = decode_binary_prediction(
-            self.guessed(guessed_pyramid),
+            self.guessed(
+                guessed_pyramid,
+                frame_reliability=frame_reliability,
+            ),
             self.probability_model,
             include_diagnostics=assemble_runtime_outputs,
         )
-        routing_raw = self.routing(routing_pyramid).float()
+        routing_raw = self.routing(
+            routing_pyramid,
+            frame_reliability=frame_reliability,
+        ).float()
         observed_logit = routing_raw[:, 0]
         support_logit = routing_raw[:, 1]
         support_probability = torch.sigmoid(support_logit)

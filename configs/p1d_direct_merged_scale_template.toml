@@ -20,9 +20,9 @@ split_seed = 170815
 split_manifest = "manifests/wtbd_first80k.json"
 
 [model]
-pipeline_variant = "WTBD-IMPLICIT-MERGE-SCALE-NLL"
+pipeline_variant = "P1D-DIRECT-MERGED-SCALE-NLL"
 probability_model = "evidential"
-geometry_conditioning = "implicit_multiview_token_cross_attention"
+geometry_conditioning = "implicit_temporal_cross_attention_with_learned_reliability"
 vggt_source = "vendor/backbone"
 checkpoint = "checkpoints/model.pt"
 patch_size = 16
@@ -48,6 +48,10 @@ implicit_geometry_heads = 8
 implicit_geometry_layers = 4
 maximum_history = 10
 maximum_prefix_tokens = 17
+frame_reliability_hidden_dim = 256
+frame_reliability_minimum = 0.25
+frame_reliability_maximum = 1.75
+training_frame_dropout_probability = 0.15
 
 [scale_fit]
 confidence_threshold = 0.2
@@ -68,7 +72,7 @@ mode = "live"
 root = "cache/wtbd_teacher"
 
 [training]
-pipeline = "WTBD-IMPLICIT-MERGE-SCALE-NLL"
+pipeline = "P1D-DIRECT-MERGED-SCALE-NLL"
 stage = "joint"
 initialization = "fresh"
 device = "cuda"
@@ -97,6 +101,13 @@ guessed_surface_weight = 0.5
 guessed_free_weight = 0.35
 guessed_visible_surface_weight = 0.40
 guessed_hidden_occupied_weight = 0.25
+guessed_hard_pixel_weight = 0.25
+guessed_hard_fraction = 0.10
+guessed_hard_minimum = 128
+guessed_hard_maximum_per_group = 8192
+history_observed_gate_weight = 0.25
+history_support_weight = 0.20
+history_guessed_weight = 0.30
 hidden_occupied_zero_fraction = 0.10
 hidden_occupied_ramp_fraction = 0.15
 wrong_evidence_kl_weight = 0.005
@@ -114,4 +125,4 @@ seed = 170820
 log_every_steps = 20
 checkpoint_every_steps = 1000
 validation_batches = 200
-output_dir = "runs/wtbd_implicit_merge_scale_first80k_fresh_v2"
+output_dir = "runs/p1d_direct_merged_scale_fresh_v1"

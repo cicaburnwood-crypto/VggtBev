@@ -195,7 +195,12 @@ class FixedMetricBEVDecoder(nn.Module):
         )
         nn.init.normal_(self.query_content, std=0.02)
 
-    def forward(self, pyramid: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        pyramid: list[torch.Tensor],
+        *,
+        frame_reliability: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         batch = pyramid[0].shape[0]
         position = self.metric_position(
             self.metric_coordinates_m.to(dtype=self.query_content.dtype)
@@ -295,7 +300,12 @@ class MetricScaleTokenHead(nn.Module):
         nn.init.normal_(self.scale_token, std=0.02)
         nn.init.normal_(self.level_embedding, std=0.02)
 
-    def forward(self, pyramid: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        pyramid: list[torch.Tensor],
+        *,
+        frame_reliability: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         batch = pyramid[0].shape[0]
         # Each frame/feature-level contributes equally; high-resolution levels
         # cannot dominate the scalar estimate merely by containing more patches.
@@ -303,10 +313,22 @@ class MetricScaleTokenHead(nn.Module):
             [level.mean(dim=(-2, -1)) for level in pyramid],
             dim=1,
         )
+        memory_weight = None
+        if frame_reliability is not None:
+            frames = pyramid[0].shape[1]
+            if frame_reliability.shape != (batch, frames):
+                raise ValueError(
+                    "frame_reliability must have shape [B,N]"
+                )
+            memory_weight = frame_reliability.repeat(1, len(pyramid))
         memory = memory + self.level_embedding
         token = self.scale_token.expand(batch, -1, -1)
         for norm, attention in zip(self.norms, self.blocks, strict=True):
-            token = token + attention(norm(token), memory)
+            token = token + attention(
+                norm(token),
+                memory,
+                memory_weight,
+            )
         feature = self.final_norm(token[:, 0])
         log_lambda = self.log_scale(feature)[:, 0].clamp(-8.0, 8.0)
         output = {

@@ -13,16 +13,30 @@ class MultiheadAttention(nn.Module):
     the quadratic attention matrix, making one query per 512x512 BEV cell viable.
     """
 
-    def __init__(self, hidden_dim: int, heads: int, *, mode: str = "linear") -> None:
+    def __init__(
+        self,
+        hidden_dim: int,
+        heads: int,
+        *,
+        mode: str = "linear",
+        projection_fusion: str = "separate",
+    ) -> None:
         super().__init__()
         if hidden_dim % heads:
             raise ValueError("hidden_dim must be divisible by heads")
         if mode not in ("linear", "exact"):
             raise ValueError("attention mode must be 'linear' or 'exact'")
+        if projection_fusion not in ("separate", "qkv", "kv"):
+            raise ValueError("projection_fusion must be separate, qkv, or kv")
         self.hidden_dim = hidden_dim
         self.heads = heads
         self.head_dim = hidden_dim // heads
         self.mode = mode
+        # Execution-only choice: all Parameter objects and state_dict keys stay
+        # unchanged. Concatenating their small weights lets the 640K-query
+        # linear-attention path issue one GEMM instead of three for self
+        # attention, and one instead of two for cross-attention K/V.
+        self.projection_fusion = projection_fusion
         # Execution-only callable; absent from state_dict/checkpoint contracts.
         self._compiled_forward_impl = None
         self.q_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -58,16 +72,66 @@ class MultiheadAttention(nn.Module):
         self,
         query: torch.Tensor,
         context: torch.Tensor,
+        context_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q = self._split(self.q_proj(query))
-        k = self._split(self.k_proj(context))
-        v = self._split(self.v_proj(context))
+        if self.projection_fusion == "qkv":
+            if query.shape != context.shape:
+                raise ValueError("QKV fusion requires matching query/context shapes")
+            weight = torch.cat(
+                (self.q_proj.weight, self.k_proj.weight, self.v_proj.weight), dim=0
+            )
+            bias = torch.cat(
+                (self.q_proj.bias, self.k_proj.bias, self.v_proj.bias), dim=0
+            )
+            q_raw, k_raw, v_raw = F.linear(query, weight, bias).split(
+                self.hidden_dim, dim=-1
+            )
+        elif self.projection_fusion == "kv":
+            q_raw = self.q_proj(query)
+            weight = torch.cat((self.k_proj.weight, self.v_proj.weight), dim=0)
+            bias = torch.cat((self.k_proj.bias, self.v_proj.bias), dim=0)
+            k_raw, v_raw = F.linear(context, weight, bias).split(
+                self.hidden_dim, dim=-1
+            )
+        else:
+            q_raw = self.q_proj(query)
+            k_raw = self.k_proj(context)
+            v_raw = self.v_proj(context)
+        q = self._split(q_raw)
+        k = self._split(k_raw)
+        v = self._split(v_raw)
+        if context_weight is not None:
+            if context_weight.shape != context.shape[:2]:
+                raise ValueError(
+                    "context_weight must have shape [batch, context_tokens]"
+                )
+            nonnegative = ~(context_weight < 0).any()
+            if nonnegative.device.type == "cuda":
+                torch._assert_async(
+                    nonnegative,
+                    "context attention weights cannot be negative",
+                )
+            elif not bool(nonnegative):
+                raise ValueError("context attention weights cannot be negative")
+            context_weight = context_weight.to(device=k.device, dtype=k.dtype)
         if self.mode == "exact":
-            output = F.scaled_dot_product_attention(q, k, v)
+            attention_bias = None
+            if context_weight is not None:
+                attention_bias = context_weight.clamp_min(1e-12).log()[
+                    :, None, None, :
+                ]
+            output = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attention_bias,
+            )
         else:
             scale = self.head_dim**-0.25
             q_feature = F.elu(q * scale) + 1.0
             k_feature = F.elu(k * scale) + 1.0
+            if context_weight is not None:
+                k_feature = k_feature * context_weight[:, None, :, None]
             key_value = torch.einsum("bhmd,bhme->bhde", k_feature, v)
             key_sum = k_feature.sum(dim=2)
             denominator = torch.einsum(
@@ -84,9 +148,16 @@ class MultiheadAttention(nn.Module):
         )
         return self.out_proj(output)
 
-    def forward(self, query: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        query: torch.Tensor,
+        context: torch.Tensor,
+        context_weight: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         implementation = self._compiled_forward_impl or self._forward_impl
-        return implementation(query, context)
+        if context_weight is None:
+            return implementation(query, context)
+        return implementation(query, context, context_weight)
 
 
 class DeformableCrossAttention(nn.Module):
@@ -460,7 +531,12 @@ class DirectDecoderBlock(nn.Module):
             )
         self.self_norm = nn.LayerNorm(hidden_dim)
         self.self_attention = MultiheadAttention(
-            hidden_dim, heads, mode=self_attention_mode
+            hidden_dim,
+            heads,
+            mode=self_attention_mode,
+            projection_fusion=(
+                "qkv" if self_attention_mode == "linear" else "separate"
+            ),
         )
         self.cross_norm = nn.LayerNorm(hidden_dim)
         self.context_norm = nn.LayerNorm(hidden_dim)
@@ -478,6 +554,9 @@ class DirectDecoderBlock(nn.Module):
                 hidden_dim,
                 heads,
                 mode=cross_attention_mode,
+                projection_fusion=(
+                    "kv" if cross_attention_mode == "linear" else "separate"
+                ),
             )
         )
         self.ffn_norm = nn.LayerNorm(hidden_dim)
@@ -513,11 +592,16 @@ class DirectDecoderBlock(nn.Module):
         query: torch.Tensor,
         context: torch.Tensor | list[torch.Tensor],
         reference_grid: torch.Tensor,
+        context_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         normalized = self.self_norm(query)
         query = query + self.self_attention(normalized, normalized)
         normalized_query = self.cross_norm(query)
         if self.cross_attention_mode == "deformable":
+            if context_weight is not None:
+                raise ValueError(
+                    "context_weight is supported only by global attention"
+                )
             if not isinstance(context, list):
                 raise TypeError("deformable cross-attention requires a feature pyramid")
             normalized_context = [
@@ -535,6 +619,7 @@ class DirectDecoderBlock(nn.Module):
             cross = self.cross_attention(
                 normalized_query,
                 self.context_norm(context),
+                context_weight,
             )
         query = query + cross
         implementation = self._compiled_ffn_residual or self._ffn_residual

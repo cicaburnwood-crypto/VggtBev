@@ -67,6 +67,8 @@ def regrid_merged_metric_targets_to_vggt_units(
     source_extent_m: float,
     target_extent_vggt: float,
     target_size: int,
+    latest_observed_free_metric: torch.Tensor | None = None,
+    latest_support_metric: torch.Tensor | None = None,
     labels: LabelValues = LabelValues(),
 ) -> dict[str, torch.Tensor]:
     """Re-express existing metric Merged labels in current VGGT units.
@@ -84,6 +86,15 @@ def regrid_merged_metric_targets_to_vggt_units(
         raise ValueError("merged metric targets must align")
     if scale_target_valid.shape != lambda_m_per_vggt.shape:
         raise ValueError("scale target validity must have shape [B]")
+    if (latest_observed_free_metric is None) != (latest_support_metric is None):
+        raise ValueError(
+            "latest observed-free and support targets must be supplied together"
+        )
+    if latest_observed_free_metric is not None and (
+        latest_observed_free_metric.shape != complete_metric.shape
+        or latest_support_metric.shape != complete_metric.shape
+    ):
+        raise ValueError("latest temporal targets must align with Merged GT")
     contract = VGGTUnitTargetContract(
         source_extent_m=float(source_extent_m),
         target_extent_vggt=float(target_extent_vggt),
@@ -119,7 +130,7 @@ def regrid_merged_metric_targets_to_vggt_units(
         raise ValueError("regridded visible labels disagree with complete GT")
     metric_extent = lambda_m_per_vggt * float(target_extent_vggt)
     source_coverage_fraction = source_coverage.float().mean(dim=(1, 2))
-    return {
+    output = {
         "complete_target": complete,
         "visible_target": visible,
         "support_target": support,
@@ -134,6 +145,30 @@ def regrid_merged_metric_targets_to_vggt_units(
         ),
         "cell_size_m_gt": metric_extent / int(target_size),
     }
+    if latest_observed_free_metric is not None:
+        latest_observed = _sample_nearest(
+            latest_observed_free_metric,
+            grid,
+        ) > 0.5
+        latest_support = _sample_nearest(latest_support_metric, grid) > 0.5
+        latest_support = latest_support & target_valid
+        latest_observed = latest_observed & latest_support
+        output.update(
+            {
+                "latest_observed_free_target": latest_observed,
+                "latest_support_target": latest_support,
+                "history_observed_free_region": (
+                    (visible != unknown)
+                    & (visible == int(labels.free))
+                    & ~latest_observed
+                    & target_valid
+                ),
+                "history_support_region": (
+                    support & ~latest_support & target_valid
+                ),
+            }
+        )
+    return output
 
 
 def restore_metric_grid_contract(

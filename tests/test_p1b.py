@@ -30,6 +30,7 @@ from vggt_bev_method1.models.p1b_probability import (
 from vggt_bev_method1.p1b_config import load_p1b_config, validate_p1b_config
 from vggt_bev_method1.p1b_losses import (
     P1BLossWeights,
+    _gaussian_boundary_weight,
     hidden_occupied_supervision_weight,
     p1b_bev_loss,
     p1b_fov_support_loss,
@@ -314,6 +315,62 @@ def test_surface_partition_does_not_change_legacy_gate_objective() -> None:
     result["loss"].backward()
     assert leaves[0].grad is None or not bool((leaves[0].grad != 0).any())
     assert bool((leaves[1].grad.abs() > 0).any())
+
+
+def test_smooth_boundary_weighting_reaches_only_gate_and_support() -> None:
+    complete, visible, support = _targets()
+    prediction, leaves = _prediction(complete.shape[-1], "bce")
+    weights = P1BLossWeights(
+        observed_gate_pixel=0.8,
+        observed_gate_region=0.2,
+        observed_gate_boundary_emphasis=3.0,
+        guessed_pixel=0.0,
+        guessed_surface=0.0,
+        wrong_evidence_kl=0.0,
+        support_bce=0.75,
+        support_dice=0.25,
+        support_boundary_emphasis=3.0,
+        boundary_sigma=2.0,
+    )
+    result = p1b_bev_loss(
+        prediction,
+        complete,
+        visible,
+        support,
+        probability_model="bce",
+        weights=weights,
+    )
+    assert result["observed_gate_boundary_weight_max"] > 1.0
+    assert result["observed_gate_boundary_weight_mean"] > 1.0
+    assert result["support_boundary_weight_max"] > 1.0
+    assert result["support_boundary_weight_mean"] > 1.0
+    result["loss"].backward()
+    assert leaves[0].grad is None or not bool((leaves[0].grad != 0).any())
+    assert bool((leaves[1].grad != 0).any())
+    assert bool((leaves[2].grad != 0).any())
+
+
+def test_gaussian_boundary_weight_is_nonlinear_and_continuous() -> None:
+    truth = torch.zeros((1, 41, 41), dtype=torch.bool)
+    truth[:, :, :21] = True
+    domain = torch.ones_like(truth)
+    weight = _gaussian_boundary_weight(
+        truth,
+        domain,
+        emphasis=5.0,
+        sigma=3.0,
+    )[0, 20]
+
+    # The GT transition lies between columns 20 and 21. Weight is maximal
+    # beside it and decays smoothly/nonlinearly toward the region interior.
+    left = weight[:21].flip(0)
+    assert weight.max() > 5.9
+    assert bool((left[:-1] >= left[1:]).all())
+    assert left[1] > 1.0
+    assert left[-1] == pytest.approx(1.0, abs=1e-5)
+    first_drop = float(left[0] - left[1])
+    distant_drop = float(left[5] - left[6])
+    assert first_drop != pytest.approx(distant_drop)
 
 
 def test_scene_gt_validity_hard_ignores_every_bev_loss() -> None:

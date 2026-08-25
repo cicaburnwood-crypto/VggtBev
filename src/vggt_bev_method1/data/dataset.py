@@ -279,6 +279,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         merged_bev_extent_m: float = 10.0,
         merged_bev_output_size: int = 800,
         include_single_targets: bool = True,
+        include_latest_temporal_targets: bool = False,
     ) -> None:
         if supervision != "metric_fov_complete_evidential":
             raise ValueError(
@@ -307,6 +308,9 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         self.merged_bev_extent_m = float(merged_bev_extent_m)
         self.merged_bev_output_size = int(merged_bev_output_size)
         self.include_single_targets = bool(include_single_targets)
+        self.include_latest_temporal_targets = bool(
+            include_latest_temporal_targets
+        )
         self.void_coverage = (
             VoidCoverageIndex(
                 void_coverage_index,
@@ -439,6 +443,43 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         return labels
 
     @classmethod
+    def _center_embed_bev(
+        cls,
+        value: torch.Tensor,
+        *,
+        source_extent_m: float,
+        output_extent_m: float,
+        output_size: int,
+    ) -> torch.Tensor:
+        """Embed a latest-ego raster in a larger latest-ego metric canvas."""
+
+        if value.ndim != 2:
+            raise ValueError("BEV embedding expects one HxW label raster")
+        if not 0.0 < source_extent_m <= output_extent_m or output_size <= 0:
+            raise ValueError("invalid centered BEV embedding contract")
+        embedded_size = max(
+            1,
+            min(
+                output_size,
+                round(output_size * source_extent_m / output_extent_m),
+            ),
+        )
+        resized = torch.nn.functional.interpolate(
+            value[None, None].float(),
+            size=(embedded_size, embedded_size),
+            mode="nearest",
+        )[0, 0].round().to(value.dtype)
+        output = torch.full(
+            (output_size, output_size),
+            cls.labels.unknown,
+            dtype=value.dtype,
+        )
+        top = (output_size - embedded_size) // 2
+        left = (output_size - embedded_size) // 2
+        output[top : top + embedded_size, left : left + embedded_size] = resized
+        return output
+
+    @classmethod
     def _validate_bev_pair(
         cls,
         complete: torch.Tensor,
@@ -524,6 +565,23 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 output_extent_m=self.single_bev_extent_m,
                 output_size=self.single_bev_output_size,
             )
+        if self.include_latest_temporal_targets:
+            latest_visible_6p5m = (
+                source_single_visible
+                if self.include_single_targets
+                else self._load_bev(
+                    single_observed_path,
+                    source_extent_m=self.single_bev_extent_m,
+                    output_extent_m=self.single_bev_extent_m,
+                    output_size=self.single_bev_output_size,
+                )
+            )
+            source_latest_visible = self._center_embed_bev(
+                latest_visible_6p5m,
+                source_extent_m=self.single_bev_extent_m,
+                output_extent_m=self.merged_bev_extent_m,
+                output_size=self.merged_bev_output_size,
+            )
         source_merged_complete = self._load_bev(
             merged_complete_path,
             source_extent_m=self.merged_source_extent_m,
@@ -565,6 +623,27 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             output_extent_m=self.merged_bev_extent_m,
             source_extent_m=self.single_bev_extent_m,
         )
+        if self.include_latest_temporal_targets:
+            latest_fov = fov_union_mask(
+                session.world_from_bev_planar[target_frame : target_frame + 1],
+                target_frame=0,
+                horizontal_fov_degrees=session.horizontal_fov_degrees,
+                output_size=self.merged_bev_output_size,
+                output_extent_m=self.merged_bev_extent_m,
+                source_extent_m=self.single_bev_extent_m,
+            )
+            latest_fov_support = latest_fov & (
+                source_merged_complete != self.labels.unknown
+            )
+            latest_visible_known = latest_fov_support & (
+                source_latest_visible != self.labels.unknown
+            )
+            latest_disagreement = latest_visible_known & (
+                source_latest_visible != source_merged_complete
+            )
+            latest_observed_free = latest_visible_known & (
+                source_latest_visible == self.labels.free
+            ) & (source_merged_complete == self.labels.free)
         if self.include_single_targets:
             (
                 single_fov_complete,
@@ -716,6 +795,26 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 "void_coverage_index_sha256": void_index_sha256,
             },
         }
+        if self.include_latest_temporal_targets:
+            output.update(
+                {
+                    "latest_observed_free_target": latest_observed_free,
+                    "latest_fov_support_target": latest_fov_support,
+                }
+            )
+            output["metadata"].update(
+                {
+                    "latest_temporal_target_source": (
+                        "latest 6.5m masked GT centered in Merged metric grid"
+                    ),
+                    "history_region_contract": (
+                        "merged union minus latest-frame support/observed-free"
+                    ),
+                    "latest_merged_label_disagreement_fraction": float(
+                        latest_disagreement.float().mean()
+                    ),
+                }
+            )
         if self.include_single_targets:
             output.update(
                 {

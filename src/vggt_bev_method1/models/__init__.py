@@ -29,6 +29,7 @@ from .p1c import (
     RelativeSE2PoseHead,
     compose_se2_residual,
 )
+from .p1d import FrameReliabilityHead, P1DHead, P1DSystem
 from .vggt_adapter import LiveVGGTOmegaAdapter
 from .wtbd_merge_scale import (
     DenseVGGTUnitQueryDecoder,
@@ -65,6 +66,9 @@ __all__ = [
     "P1CSystem",
     "RelativeSE2PoseHead",
     "compose_se2_residual",
+    "FrameReliabilityHead",
+    "P1DHead",
+    "P1DSystem",
     "DenseVGGTUnitQueryDecoder",
     "ImplicitGeometryBlock",
     "ImplicitGeometryContextTrunk",
