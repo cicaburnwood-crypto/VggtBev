@@ -30,6 +30,12 @@ from .p1c import (
     compose_se2_residual,
 )
 from .p1d import FrameReliabilityHead, P1DHead, P1DSystem
+from .m04 import (
+    FactorizedNativeQuery,
+    M04Head,
+    M04System,
+    ParallelQueryBranch,
+)
 from .vggt_adapter import LiveVGGTOmegaAdapter
 from .wtbd_merge_scale import (
     DenseVGGTUnitQueryDecoder,
@@ -69,6 +75,10 @@ __all__ = [
     "FrameReliabilityHead",
     "P1DHead",
     "P1DSystem",
+    "FactorizedNativeQuery",
+    "M04Head",
+    "M04System",
+    "ParallelQueryBranch",
     "DenseVGGTUnitQueryDecoder",
     "ImplicitGeometryBlock",
     "ImplicitGeometryContextTrunk",

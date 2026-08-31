@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import pickle
 import random
 from collections import defaultdict
 from collections.abc import Sequence
@@ -22,6 +24,10 @@ from .fov_targets import (
 )
 from .preprocess import RGBResizePad
 from .void_coverage import FINAL_GT_VOID_FILTER, VoidCoverageIndex
+
+
+SESSION_RECORD_CACHE_FORMAT = 1
+_SESSION_RECORD_CACHE_MEMORY: dict[str, dict] = {}
 
 
 @dataclass(frozen=True)
@@ -174,7 +180,11 @@ def _load_record(root: Path, path: Path) -> SessionRecord:
         dataset=str(metadata["dataset"]),
         scene_id=str(metadata["scene_id"]),
         frame_count=frame_count,
-        metadata=metadata,
+        # The complete writer metadata can exceed 100 KiB per session and is
+        # not consumed after the validated fields above have been extracted.
+        # Retaining it for a full-data run multiplies tens of GiB across DDP
+        # ranks without changing a sample, target, or runtime contract.
+        metadata={},
         intrinsic=intrinsic,
         source_height=source_height,
         source_width=source_width,
@@ -191,6 +201,40 @@ def load_session_records(
     session_keys: Sequence[str] | None = None,
 ) -> list[SessionRecord]:
     resolved = Path(root).expanduser().resolve()
+    cache_text = os.environ.get("VGGT_BEV_SESSION_RECORD_CACHE", "").strip()
+    if cache_text:
+        cache_path = Path(cache_text).expanduser().resolve()
+        cache_key = str(cache_path)
+        payload = _SESSION_RECORD_CACHE_MEMORY.get(cache_key)
+        if payload is None:
+            if not cache_path.is_file():
+                raise FileNotFoundError(
+                    f"configured session-record cache is missing: {cache_path}"
+                )
+            with cache_path.open("rb") as stream:
+                payload = pickle.load(stream)
+            if int(payload.get("format_version", 0)) != SESSION_RECORD_CACHE_FORMAT:
+                raise ValueError("session-record cache format is unsupported")
+            if Path(payload.get("dataset_root", "")).resolve() != resolved:
+                raise ValueError("session-record cache dataset root mismatch")
+            expected_manifest = os.environ.get(
+                "VGGT_BEV_SESSION_RECORD_CACHE_MANIFEST_SHA256", ""
+            ).strip()
+            if expected_manifest and payload.get("manifest_content_sha256") != expected_manifest:
+                raise ValueError("session-record cache manifest SHA-256 mismatch")
+            records_by_key = payload.get("records_by_key")
+            if not isinstance(records_by_key, dict) or not records_by_key:
+                raise ValueError("session-record cache contains no records")
+            _SESSION_RECORD_CACHE_MEMORY[cache_key] = payload
+        records_by_key = payload["records_by_key"]
+        if session_keys is None:
+            return list(records_by_key.values())
+        if len(set(session_keys)) != len(session_keys):
+            raise ValueError("requested session keys contain duplicates")
+        missing = [key for key in session_keys if key not in records_by_key]
+        if missing:
+            raise KeyError(f"session-record cache lacks manifest key: {missing[0]}")
+        return [records_by_key[key] for key in session_keys]
     if session_keys is None:
         paths = discover_sessions(resolved)
     else:
@@ -276,6 +320,9 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         single_bev_extent_m: float = 6.5,
         single_bev_output_size: int = 512,
         merged_source_extent_m: float = 10.0,
+        merged_source_image_size: int = 512,
+        merged_complete_directory: str = "merged_complete_10m",
+        merged_masked_directory: str = "merged_masked_10m",
         merged_bev_extent_m: float = 10.0,
         merged_bev_output_size: int = 800,
         include_single_targets: bool = True,
@@ -293,6 +340,14 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             raise ValueError("Single BEV grid must remain 6.5 m at 512x512")
         if merged_source_extent_m <= 0.0:
             raise ValueError("Merged source extent must be positive")
+        if merged_source_image_size <= 0:
+            raise ValueError("Merged source image size must be positive")
+        if not merged_complete_directory or not merged_masked_directory:
+            raise ValueError("Merged source directories cannot be empty")
+        if Path(merged_complete_directory).is_absolute() or Path(
+            merged_masked_directory
+        ).is_absolute():
+            raise ValueError("Merged source directories must be session-relative")
         if not 0.0 < merged_bev_extent_m <= merged_source_extent_m:
             raise ValueError(
                 "Merged output extent must be positive and no larger than its source"
@@ -305,6 +360,9 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         self.single_bev_extent_m = float(single_bev_extent_m)
         self.single_bev_output_size = int(single_bev_output_size)
         self.merged_source_extent_m = float(merged_source_extent_m)
+        self.merged_source_image_size = int(merged_source_image_size)
+        self.merged_complete_directory = str(merged_complete_directory)
+        self.merged_masked_directory = str(merged_masked_directory)
         self.merged_bev_extent_m = float(merged_bev_extent_m)
         self.merged_bev_output_size = int(merged_bev_output_size)
         self.include_single_targets = bool(include_single_targets)
@@ -393,6 +451,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         source_extent_m: float,
         output_extent_m: float,
         output_size: int,
+        source_image_size: int = 512,
     ) -> torch.Tensor:
         """Load a metric raster, optionally center-cropping before resampling.
 
@@ -409,8 +468,12 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         if output_size <= 0:
             raise ValueError("BEV output size must be positive")
         with Image.open(path) as image:
-            if image.mode != "L" or image.size != (512, 512):
-                raise ValueError(f"metric BEV target must be 512x512 grayscale: {path}")
+            expected = (source_image_size, source_image_size)
+            if image.mode != "L" or image.size != expected:
+                raise ValueError(
+                    "metric BEV target must be "
+                    f"{source_image_size}x{source_image_size} grayscale: {path}"
+                )
             if output_extent_m < source_extent_m:
                 source_size = image.width
                 margin_px = (
@@ -430,7 +493,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                     ),
                     resample=Image.Resampling.NEAREST,
                 )
-            elif output_size != 512:
+            elif output_size != source_image_size:
                 image = image.resize(
                     (output_size, output_size),
                     Image.Resampling.NEAREST,
@@ -539,12 +602,14 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         )
         merged_observed_path = (
             session.path
-            / "bev_6p5m/merged_masked_10m"
+            / "bev_6p5m"
+            / self.merged_masked_directory
             / f"frame_{target_frame:06d}.png"
         )
         merged_complete_path = (
             session.path
-            / "bev_6p5m/merged_complete_10m"
+            / "bev_6p5m"
+            / self.merged_complete_directory
             / f"frame_{target_frame:06d}.png"
         )
         if self.include_single_targets:
@@ -587,12 +652,14 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             source_extent_m=self.merged_source_extent_m,
             output_extent_m=self.merged_bev_extent_m,
             output_size=self.merged_bev_output_size,
+            source_image_size=self.merged_source_image_size,
         )
         source_merged_visible = self._load_bev(
             merged_observed_path,
             source_extent_m=self.merged_source_extent_m,
             output_extent_m=self.merged_bev_extent_m,
             output_size=self.merged_bev_output_size,
+            source_image_size=self.merged_source_image_size,
         )
         if self.include_single_targets:
             self._validate_bev_pair(
@@ -761,6 +828,9 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                     self.merged_bev_extent_m / 2.0,
                 ],
                 "merged_source_extent_m": self.merged_source_extent_m,
+                "merged_source_image_size": self.merged_source_image_size,
+                "merged_complete_directory": self.merged_complete_directory,
+                "merged_masked_directory": self.merged_masked_directory,
                 "merged_target_transform": (
                     "identity"
                     if self.merged_bev_extent_m == self.merged_source_extent_m

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 from datetime import timedelta
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -126,12 +127,31 @@ def distributed_runtime(
                 "device_name": torch.cuda.get_device_name(device),
             }
         )
+        init_file = os.environ.get("VGGT_BEV_DIST_INIT_FILE", "").strip()
+        init_options = {}
+        if init_file:
+            resolved_init_file = Path(init_file).expanduser().resolve()
+            if not resolved_init_file.parent.is_dir():
+                raise RuntimeError(
+                    "distributed FileStore parent does not exist: "
+                    f"{resolved_init_file.parent}"
+                )
+            init_options = {
+                "init_method": resolved_init_file.as_uri(),
+                "rank": rank,
+                "world_size": world_size,
+            }
+            preflight["rendezvous"] = "file_store"
+            preflight["rendezvous_path"] = str(resolved_init_file)
+        else:
+            preflight["rendezvous"] = "env_tcp_store"
         dist.init_process_group(
             backend="nccl",
             device_id=device,
             timeout=timedelta(
                 seconds=int(training.get("nccl_timeout_seconds", 300))
             ),
+            **init_options,
         )
         return True, rank, world_size, local_rank, device, preflight
     if required_devices > 1:

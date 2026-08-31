@@ -206,6 +206,7 @@ class LiveVGGTOmegaAdapter(nn.Module):
     """Frozen live VGGT-Ω extractor used identically in training and runtime."""
 
     geometry_cue_dim = 14
+    supports_native_token_dtype = True
 
     def __init__(
         self,
@@ -256,7 +257,12 @@ class LiveVGGTOmegaAdapter(nn.Module):
         shared = self.aggregate(images)
         return {**shared, **self.decode_geometry(shared)}
 
-    def aggregate(self, images: torch.Tensor) -> dict:
+    def aggregate(
+        self,
+        images: torch.Tensor,
+        *,
+        preserve_token_dtype: bool = False,
+    ) -> dict:
         """Run the frozen shared VGGT trunk once for all parallel heads."""
 
         if images.ndim != 5:
@@ -277,13 +283,19 @@ class LiveVGGTOmegaAdapter(nn.Module):
                 value = aggregated[layer]
                 if value is None:
                     raise RuntimeError(f"VGGT did not cache requested layer {layer}")
-                tokens[layer] = value[:, :, patch_start:].float().detach()
+                patch_tokens = value[:, :, patch_start:]
+                tokens[layer] = (
+                    patch_tokens
+                    if preserve_token_dtype
+                    else patch_tokens.float()
+                ).detach()
             final_tokens = aggregated[-1]
             if final_tokens is None:
                 raise RuntimeError("VGGT did not cache the final token layer")
-            camera_register_tokens = (
-                final_tokens[:, :, :patch_start].float().detach()
-            )
+            camera_register_tokens = final_tokens[:, :, :patch_start]
+            if not preserve_token_dtype:
+                camera_register_tokens = camera_register_tokens.float()
+            camera_register_tokens = camera_register_tokens.detach()
         return {
             "tokens": tokens,
             "camera_register_tokens": camera_register_tokens,

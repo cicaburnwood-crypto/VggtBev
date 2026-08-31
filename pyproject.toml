@@ -3,20 +3,21 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "odineye-p1d-direct-merged-scale"
-version = "1.1.0"
-description = "Direct temporal Merged BEV, evidence and scale from frozen VGGT tokens"
+name = "odineye-m04-parallel-merged-scale"
+version = "1.2.0"
+description = "Parallel latest-anchor/history Merged BEV and scale from frozen VGGT tokens"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
   "Pillow>=10",
+  "scipy>=1.10",
   "torch>=2.5",
   "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8"]
-void-audit = ["scipy>=1.10"]
+void-audit = []
 
 [project.scripts]
 odineye-p1b-legacy-train = "vggt_bev_method1.cli_train_metric:main"
@@ -29,6 +30,8 @@ odineye-wtbd-train = "vggt_bev_method1.cli_train_wtbd:main"
 odineye-wtbd-scale-audit = "vggt_bev_method1.cli_audit_wtbd_scale:main"
 odineye-p1d-train = "vggt_bev_method1.cli_train_p1d:main"
 odineye-p1d-eval = "vggt_bev_method1.cli_eval_p1d:main"
+odineye-m04-train = "vggt_bev_method1.cli_train_m04:main"
+odineye-m04-eval = "vggt_bev_method1.cli_eval_m04:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
