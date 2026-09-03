@@ -58,6 +58,19 @@ class SampleRecord:
     target_frame: int
 
 
+def _resolve_raster_path(path: Path) -> Path:
+    """Resolve the verified rolling PNG-to-JPEG storage migration."""
+
+    if path.is_file():
+        return path
+    if path.suffix.lower() == ".png":
+        for suffix in (".jpeg", ".jpg"):
+            candidate = path.with_suffix(suffix)
+            if candidate.is_file():
+                return candidate
+    raise FileNotFoundError(f"image artifact is missing: {path}")
+
+
 def discover_sessions(root: str | Path) -> list[Path]:
     resolved = Path(root).expanduser().resolve()
     if not resolved.is_dir():
@@ -125,8 +138,23 @@ def _load_record(root: Path, path: Path) -> SessionRecord:
     depth = metadata.get("depth", {})
     if str(depth.get("units", "")).lower() not in ("metres", "meters", "m"):
         raise ValueError(f"GT depth is not metric: {path}")
+    # New writers state the geometric convention explicitly.  Retain the two
+    # legacy source-string mappings so existing immutable manifests continue
+    # to load byte-for-byte, but do not require every new dataset adapter to
+    # impersonate Habitat or AI2-THOR merely to describe metric depth.
     depth_source = str(depth.get("source", "")).strip().lower()
-    if depth_source == "habitat-sim pinhole depth sensor ground truth":
+    explicit_depth_convention = str(depth.get("convention", "")).strip().lower()
+    accepted_depth_conventions = {
+        "camera_axis_z_depth_m",
+        "euclidean_camera_ray_distance_m",
+    }
+    if explicit_depth_convention:
+        if explicit_depth_convention not in accepted_depth_conventions:
+            raise ValueError(
+                f"GT depth convention is unsupported: {explicit_depth_convention}"
+            )
+        source_gt_depth_convention = explicit_depth_convention
+    elif depth_source == "habitat-sim pinhole depth sensor ground truth":
         source_gt_depth_convention = "camera_axis_z_depth_m"
     elif depth_source == "ai2-thor synchronized third-party metric depth ground truth":
         source_gt_depth_convention = "euclidean_camera_ray_distance_m"
@@ -411,9 +439,38 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         loaded = np.load(path, allow_pickle=False)
         if isinstance(loaded, np.lib.npyio.NpzFile):
             try:
-                if "depth" not in loaded:
-                    raise ValueError(f"compressed depth file lacks 'depth': {path}")
-                depth = loaded["depth"]
+                if "depth" in loaded:
+                    depth = loaded["depth"]
+                elif "depth_m" in loaded:
+                    depth = loaded["depth_m"]
+                elif {
+                    "depth_q",
+                    "scale_m",
+                    "invalid_q",
+                    "format_version",
+                } <= set(loaded.files):
+                    quantized = loaded["depth_q"]
+                    scale = np.asarray(loaded["scale_m"])
+                    invalid = np.asarray(loaded["invalid_q"])
+                    version = np.asarray(loaded["format_version"])
+                    if quantized.dtype != np.uint16 or quantized.ndim != 2:
+                        raise ValueError(
+                            f"compact depth_q must be uint16 HxW: {path}"
+                        )
+                    if scale.size != 1 or invalid.size != 1 or version.size != 1:
+                        raise ValueError(f"compact depth metadata must be scalar: {path}")
+                    scale_m = float(scale.reshape(()))
+                    invalid_q = int(invalid.reshape(()))
+                    format_version = int(version.reshape(()))
+                    if format_version != 1 or not np.isfinite(scale_m) or scale_m <= 0:
+                        raise ValueError(f"unsupported compact depth contract: {path}")
+                    valid = quantized != invalid_q
+                    depth = quantized.astype(np.float32) * np.float32(scale_m)
+                    depth[~valid] = 0.0
+                else:
+                    raise ValueError(
+                        f"unsupported compressed depth keys {sorted(loaded.files)}: {path}"
+                    )
             finally:
                 loaded.close()
         else:
@@ -467,13 +524,29 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             raise ValueError("BEV output extent cannot exceed source extent")
         if output_size <= 0:
             raise ValueError("BEV output size must be positive")
-        with Image.open(path) as image:
+        path = _resolve_raster_path(path)
+        with Image.open(path) as encoded:
             expected = (source_image_size, source_image_size)
-            if image.mode != "L" or image.size != expected:
+            if encoded.mode != "L" or encoded.size != expected:
                 raise ValueError(
                     "metric BEV target must be "
                     f"{source_image_size}x{source_image_size} grayscale: {path}"
                 )
+            pixels = np.asarray(encoded, dtype=np.uint8).copy()
+
+        # JPEG is a storage codec, not a soft-label representation. Snap each
+        # decoded byte to the nearest simulator-GT palette value before any
+        # spatial transform, restoring categorical occupancy semantics.
+        if path.suffix.lower() in {".jpg", ".jpeg"}:
+            palette = np.asarray(
+                [cls.labels.occupied, cls.labels.unknown, cls.labels.free],
+                dtype=np.int16,
+            )
+            distances = np.abs(pixels[..., None].astype(np.int16) - palette)
+            pixels = palette[np.argmin(distances, axis=-1)].astype(np.uint8)
+
+        image = Image.fromarray(pixels)
+        try:
             if output_extent_m < source_extent_m:
                 source_size = image.width
                 margin_px = (
@@ -499,6 +572,8 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                     Image.Resampling.NEAREST,
                 )
             labels = torch.from_numpy(np.asarray(image, dtype=np.uint8).copy())
+        finally:
+            image.close()
         values = {int(value) for value in torch.unique(labels)}
         allowed = {cls.labels.occupied, cls.labels.unknown, cls.labels.free}
         if not values <= allowed:
@@ -567,7 +642,9 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         depths: list[torch.Tensor] = []
         depth_valid: list[torch.Tensor] = []
         for frame in range(target_frame + 1):
-            rgb_path = session.path / "camera" / f"frame_{frame:06d}.png"
+            rgb_path = _resolve_raster_path(
+                session.path / "camera" / f"frame_{frame:06d}.png"
+            )
             with Image.open(rgb_path) as image:
                 if (image.height, image.width) != (
                     session.source_height,
@@ -699,18 +776,38 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 output_extent_m=self.merged_bev_extent_m,
                 source_extent_m=self.single_bev_extent_m,
             )
-            latest_fov_support = latest_fov & (
-                source_merged_complete != self.labels.unknown
+            latest_candidate_known = (
+                latest_fov
+                & (source_merged_complete != self.labels.unknown)
+                & (source_latest_visible != self.labels.unknown)
             )
-            latest_visible_known = latest_fov_support & (
-                source_latest_visible != self.labels.unknown
-            )
-            latest_disagreement = latest_visible_known & (
+            latest_disagreement = latest_candidate_known & (
                 source_latest_visible != source_merged_complete
             )
+            # Complete collision truth is authoritative. A rare disagreement
+            # in the stored current masked raster is made unobserved rather
+            # than copied into the latest auxiliary target as a false edge.
+            latest_visible_consistent = torch.where(
+                latest_disagreement,
+                torch.full_like(source_latest_visible, self.labels.unknown),
+                source_latest_visible,
+            )
+            (
+                latest_fov_complete,
+                latest_visible,
+                latest_fov_support,
+            ) = cap_complete_and_visible_to_fov(
+                source_merged_complete,
+                latest_visible_consistent,
+                latest_fov,
+                labels=self.labels,
+            )
+            latest_visible_known = latest_fov_support & (
+                latest_visible != self.labels.unknown
+            )
             latest_observed_free = latest_visible_known & (
-                source_latest_visible == self.labels.free
-            ) & (source_merged_complete == self.labels.free)
+                latest_visible == self.labels.free
+            ) & (latest_fov_complete == self.labels.free)
         if self.include_single_targets:
             (
                 single_fov_complete,
@@ -743,6 +840,12 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             merged_visible,
             name="merged FOV-complete",
         )
+        if self.include_latest_temporal_targets:
+            self._validate_bev_pair(
+                latest_fov_complete,
+                latest_visible,
+                name="latest auxiliary FOV-complete",
+            )
         if self.void_coverage is None:
             if self.include_single_targets:
                 single_gt_valid = torch.ones_like(
@@ -868,8 +971,11 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         if self.include_latest_temporal_targets:
             output.update(
                 {
+                    "latest_fov_complete_target": latest_fov_complete,
+                    "latest_visible_target": latest_visible,
                     "latest_observed_free_target": latest_observed_free,
                     "latest_fov_support_target": latest_fov_support,
+                    "latest_gt_valid_mask": merged_gt_valid,
                 }
             )
             output["metadata"].update(

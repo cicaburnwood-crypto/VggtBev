@@ -1,4 +1,24 @@
-# P1D Direct Merged BEV
+# M05 Latest-Anchored Reverse-Gated Merged BEV
+
+M05 is the active RGB-window to Merged-BEV-and-Scale pipeline. It restores a
+full native 512 x 512 query table, anchors the map with the latest frame, and
+then applies one shared gated deformable update to history frames from newest
+to oldest. A training-only latest-frame auxiliary prediction uses the proven
+Single-Baseline map objective; runtime still returns only Merged BEV and Scale.
+
+It reuses the existing 512 x 512, 10 x 10 m Merged supervision and requires no
+new data collection. See `M05_IMPLEMENTATION.md` for the complete architecture,
+loss, data, and runtime contracts.
+
+```bash
+pytest -q tests/test_m05.py tests/test_m04.py tests/test_dataset.py
+python -m vggt_bev_method1.cli_train_m05 \
+  --config configs/m05_reverse_gated_10m_template.toml \
+  --data-only
+scripts/train_m05.sh configs/m05_reverse_gated_10m_template.toml
+```
+
+## Legacy P1D Direct Merged BEV
 
 P1D is the successor to P1C/WTBD. It is one differentiable, single-forward
 runtime path:

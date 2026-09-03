@@ -8,7 +8,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .dataset import _load_record, discover_sessions, load_session_records
+from .dataset import (
+    _load_record,
+    _resolve_raster_path,
+    discover_sessions,
+    load_session_records,
+)
 
 FORMAT_VERSION = 6
 
@@ -29,17 +34,25 @@ def _training_artifacts(record) -> list[Path]:
     ]
     for frame in range(record.frame_count):
         filename = f"frame_{frame:06d}.png"
-        paths.append(record.path / "camera" / filename)
+        paths.append(_resolve_raster_path(record.path / "camera" / filename))
         paths.append(
             record.path / "depth" / f"frame_{frame:06d}{record.depth_suffix}"
         )
-        paths.append(record.path / "bev_6p5m/masked" / filename)
-        paths.append(record.path / "bev_6p5m/complete" / filename)
         paths.append(
-            record.path / "bev_6p5m/merged_masked_10m" / filename
+            _resolve_raster_path(record.path / "bev_6p5m/masked" / filename)
         )
         paths.append(
-            record.path / "bev_6p5m/merged_complete_10m" / filename
+            _resolve_raster_path(record.path / "bev_6p5m/complete" / filename)
+        )
+        paths.append(
+            _resolve_raster_path(
+                record.path / "bev_6p5m/merged_masked_10m" / filename
+            )
+        )
+        paths.append(
+            _resolve_raster_path(
+                record.path / "bev_6p5m/merged_complete_10m" / filename
+            )
         )
     return paths
 

@@ -10,7 +10,12 @@ from PIL import Image
 from vggt_bev_method1.data import VGGNAVMethod1Dataset, method1_collate
 
 
-def _session(root: Path, *, procthor: bool = False) -> Path:
+def _session(
+    root: Path,
+    *,
+    procthor: bool = False,
+    explicit_depth_convention: str | None = None,
+) -> Path:
     path = root / "GPU0" / "session_000001_test_scene"
     for directory in (
         "camera",
@@ -41,7 +46,16 @@ def _session(root: Path, *, procthor: bool = False) -> Path:
             "source": (
                 "AI2-THOR synchronized third-party metric depth ground truth"
                 if procthor
-                else "Habitat-Sim pinhole depth sensor ground truth"
+                else (
+                    "TartanGround DepthPlanar packed float32 ground truth"
+                    if explicit_depth_convention
+                    else "Habitat-Sim pinhole depth sensor ground truth"
+                )
+            ),
+            **(
+                {"convention": explicit_depth_convention}
+                if explicit_depth_convention
+                else {}
             ),
         },
         "bev": {
@@ -164,6 +178,27 @@ def test_procthor_ray_distance_is_converted_to_camera_axis_z(tmp_path: Path) -> 
         "euclidean_camera_ray_distance_m"
     )
     assert sample["metadata"]["gt_depth_convention"] == "camera_axis_z_depth_m"
+    assert torch.allclose(
+        sample["scale_gt_depth_m"],
+        torch.full_like(sample["scale_gt_depth_m"], 2.0),
+        atol=1e-5,
+    )
+
+
+def test_explicit_tartanground_z_depth_convention_is_accepted(tmp_path: Path) -> None:
+    _session(
+        tmp_path,
+        explicit_depth_convention="camera_axis_z_depth_m",
+    )
+    dataset = VGGNAVMethod1Dataset(
+        tmp_path,
+        supervision="metric_fov_complete_evidential",
+        maximum_history=1,
+    )
+    sample = dataset[0]
+    assert sample["metadata"]["source_gt_depth_convention"] == (
+        "camera_axis_z_depth_m"
+    )
     assert torch.allclose(
         sample["scale_gt_depth_m"],
         torch.full_like(sample["scale_gt_depth_m"], 2.0),

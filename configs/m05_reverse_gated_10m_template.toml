@@ -1,0 +1,145 @@
+[data]
+root = "data/dense_workers"
+supervision = "metric_fov_complete_evidential"
+coordinate_mode = "metric_source_to_vggt_units"
+gt_depth_convention = "camera_axis_z_depth_m"
+merged_source_extent_m = 10.0
+merged_source_image_size = 512
+merged_complete_directory = "merged_complete_10m"
+merged_masked_directory = "merged_masked_10m"
+merged_source_output_size = 512
+image_height = 384
+image_width = 512
+sample_stride = 1
+minimum_history = 1
+maximum_history = 10
+sampling_mode = "one_prefix_per_session"
+maximum_sessions = 260000
+session_selection_order = "completion_time"
+verify_manifest_metadata_at_startup = true
+verify_manifest_artifacts_at_startup = true
+validation_fraction = 0.05
+split_seed = 170815
+split_manifest = "manifests/wtbd_first260k_completion.json"
+
+[model]
+pipeline_variant = "M05-LATEST-ANCHORED-REVERSE-GATED-MERGED-SCALE-NLL"
+probability_model = "evidential"
+geometry_conditioning = "latest_anchor_reverse_gated_history"
+vggt_source = "vendor/backbone"
+checkpoint = "checkpoints/model.pt"
+patch_size = 16
+cached_layers = [4, 11, 17, 23]
+spatial_scales = [4.0, 2.0, 1.0, 0.5]
+vggt_token_dim = 2048
+hidden_dim = 64
+attention_heads = 8
+latest_decoder_layers = 2
+# One shared update cell is applied once to each history frame. Raising this
+# value adds depth per frame rather than changing the temporal order.
+history_update_layers = 1
+scale_decoder_layers = 2
+self_attention_mode = "linear"
+deformable_samples = 4
+# Execution-only chunking. A real-data pro6000 sweep found 65536 to be 2.44x
+# faster than 8192 for a ten-frame batch=1 train step with similar peak memory.
+cross_query_chunk_size = 65536
+merged_bev_output_size = 512
+merged_bev_extent_vggt = 6.5
+native_query_resolution = true
+full_per_pixel_query = true
+reverse_history_weight_sharing = true
+query_fourier_bands = 4
+refinement_layers = 1
+predict_scale_uncertainty = true
+implicit_geometry_hidden_dim = 256
+implicit_geometry_heads = 8
+implicit_geometry_layers = 4
+maximum_history = 10
+maximum_prefix_tokens = 17
+frame_reliability_hidden_dim = 256
+frame_reliability_minimum = 0.25
+frame_reliability_maximum = 1.75
+# Conservative GRU-style initialization. It is trainable and does not impose
+# a hard visibility or GT-derived update rule.
+history_gate_initial_bias = -1.0
+
+[scale_fit]
+confidence_threshold = 0.2
+minimum_depth_m = 0.05
+maximum_depth_m = 80.0
+residual_threshold_log = 0.25
+huber_delta_log = 0.05
+minimum_valid_pixels = 1024
+maximum_pixels_per_frame = 8192
+minimum_inlier_ratio = 0.35
+minimum_quality_weight = 0.10
+quality_sigma_log = 0.10
+desired_log_depth_range = 2.0
+irls_iterations = 4
+
+[teacher_cache]
+mode = "live"
+root = "cache/m05_teacher"
+
+[training]
+pipeline = "M05-LATEST-ANCHORED-REVERSE-GATED-MERGED-SCALE-NLL"
+stage = "joint"
+initialization = "fresh"
+bev_objective = "single_baseline_dual_supervision"
+latest_auxiliary_loss_weight = 0.50
+device = "cuda"
+required_cuda_devices = 1
+distributed_backend = "nccl"
+require_same_numa = false
+nccl_p2p_level = "AUTO"
+nccl_timeout_seconds = 300
+ddp_static_graph = false
+ddp_find_unused_parameters = true
+epochs = 15
+# Portable default. The dedicated 96 GiB pro6000 profile uses batch_size=10;
+# a direct all-ten-frame optimizer probe measured 86.18 GiB allocated and
+# 91.22 GiB reserved on a 95.6-GiB device. Lower-memory targets must retain a
+# separately validated smaller per-rank batch.
+batch_size = 1
+num_workers = 8
+persistent_workers = true
+prefetch_factor = 4
+learning_rate = 0.0001
+minimum_learning_rate = 0.00001
+weight_decay = 0.02
+warmup_fraction = 0.03
+gradient_clip_norm = 1.0
+
+# Exact proven Single-Baseline loss family, applied to latest and Merged and
+# averaged. Boundary emphasis remains zero because the best Single run obtained
+# its edge quality from surface grouping and support Dice, not a custom contour.
+observed_gate_pixel_weight = 1.0
+observed_gate_region_weight = 0.0
+observed_gate_boundary_emphasis = 0.0
+guessed_pixel_weight = 1.0
+guessed_surface_weight = 0.5
+guessed_free_weight = 0.35
+guessed_visible_surface_weight = 0.40
+guessed_hidden_occupied_weight = 0.25
+wrong_evidence_kl_weight = 0.005
+support_bce_weight = 0.5
+support_dice_weight = 0.5
+support_boundary_emphasis = 0.0
+boundary_sigma = 3.0
+wrong_evidence_zero_fraction = 0.20
+wrong_evidence_ramp_fraction = 0.10
+hidden_occupied_zero_fraction = 0.10
+hidden_occupied_ramp_fraction = 0.15
+
+scale_student_t_degrees_of_freedom = 3.0
+scale_minimum_sigma_log = 0.02
+scale_maximum_sigma_log = 2.0
+minimum_mean_source_coverage = 0.0
+fused_optimizer = true
+compile_head = false
+seed = 170905
+log_every_steps = 20
+checkpoint_every_steps = 5000
+validation_batches = 500
+output_dir = "runs/m05_reverse_gated_first260k_15e_fresh_v1"

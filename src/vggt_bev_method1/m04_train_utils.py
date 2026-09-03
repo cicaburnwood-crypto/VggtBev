@@ -26,8 +26,11 @@ def m04_collate(samples: list[dict]) -> dict:
         "merged_gt_valid_mask",
     )
     optional_tensor_keys = (
+        "latest_fov_complete_target",
+        "latest_visible_target",
         "latest_observed_free_target",
         "latest_fov_support_target",
+        "latest_gt_valid_mask",
     )
     output = {
         key: torch.stack([sample[key] for sample in samples])
