@@ -13,8 +13,89 @@ from .p1b_probability import (
     decode_binary_prediction,
     fuse_pixel_routing,
 )
-from .p1d import FrameReliabilityHead
 from .wtbd_merge_scale import ImplicitGeometryContextTrunk
+
+
+class StructuredFrameReliabilityHead(nn.Module):
+    """Predict frame reliability without averaging camera and register roles.
+
+    VGGT-Omega supplies one camera token followed by sixteen learned register
+    tokens per frame. The camera token remains an explicit feature, while the
+    register bank is summarized by learned content- and type-aware attention.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        *,
+        maximum_prefix_tokens: int = 17,
+        minimum: float = 0.25,
+        maximum: float = 1.75,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0 or hidden_dim <= 0:
+            raise ValueError("frame reliability dimensions must be positive")
+        if maximum_prefix_tokens < 2:
+            raise ValueError("camera plus at least one register token are required")
+        if not 0.0 < minimum < 1.0 < maximum:
+            raise ValueError("reliability bounds must straddle one")
+        self.maximum_prefix_tokens = int(maximum_prefix_tokens)
+        self.minimum = float(minimum)
+        self.maximum = float(maximum)
+        self.camera_projection = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+        )
+        self.register_norm = nn.LayerNorm(input_dim)
+        self.register_score = nn.Linear(input_dim, 1, bias=False)
+        self.register_type_bias = nn.Parameter(
+            torch.zeros(maximum_prefix_tokens - 1)
+        )
+        self.register_projection = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+        )
+        self.network = nn.Sequential(
+            nn.LayerNorm(hidden_dim * 2),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        nn.init.zeros_(self.register_score.weight)
+        nn.init.zeros_(self.network[-1].weight)
+        nn.init.zeros_(self.network[-1].bias)
+
+    def _structured_feature(self, prefix_tokens: torch.Tensor) -> torch.Tensor:
+        if prefix_tokens.ndim != 4:
+            raise ValueError("prefix tokens must have shape [B,N,P,C]")
+        prefix_count = prefix_tokens.shape[2]
+        if not 2 <= prefix_count <= self.maximum_prefix_tokens:
+            raise ValueError("prefix token count is outside the structured contract")
+        camera = prefix_tokens[:, :, 0]
+        registers = prefix_tokens[:, :, 1:]
+        score = self.register_score(self.register_norm(registers)).squeeze(-1)
+        score = score + self.register_type_bias[: registers.shape[2]][None, None, :]
+        weight = torch.softmax(score.float(), dim=2).to(dtype=registers.dtype)
+        register_context = (registers * weight.unsqueeze(-1)).sum(dim=2)
+        return torch.cat(
+            (
+                self.camera_projection(camera),
+                self.register_projection(register_context),
+            ),
+            dim=-1,
+        )
+
+    def forward(self, prefix_tokens: torch.Tensor) -> torch.Tensor:
+        raw = self.network(self._structured_feature(prefix_tokens)).squeeze(-1)
+        reliability = self.minimum + (
+            self.maximum - self.minimum
+        ) * torch.sigmoid(raw)
+        # Normalization is across homogeneous per-frame scalar reliabilities;
+        # it redistributes temporal weight without mixing token roles.
+        return reliability / reliability.mean(dim=1, keepdim=True).clamp_min(1e-6)
 
 
 class DenseNativeQuery(nn.Module):
@@ -200,12 +281,16 @@ class M05Head(nn.Module):
         frame_reliability_minimum: float = 0.25,
         frame_reliability_maximum: float = 1.75,
         history_gate_initial_bias: float = -1.0,
+        structured_prefix_readout: bool = True,
+        structured_frame_reliability: bool = True,
     ) -> None:
         super().__init__()
         if latest_decoder_layers <= 0 or history_update_layers <= 0:
             raise ValueError("M05 decoder depths must be positive")
         if refinement_layers <= 0:
             raise ValueError("M05 requires at least one spatial refinement block")
+        if not structured_prefix_readout or not structured_frame_reliability:
+            raise ValueError("M05 requires role-preserving prefix-token readout")
         self.maximum_history = int(maximum_history)
         projector_args = (
             cached_layers,
@@ -223,16 +308,19 @@ class M05Head(nn.Module):
             layers=implicit_geometry_layers,
             maximum_history=maximum_history,
             maximum_prefix_tokens=maximum_prefix_tokens,
+            structured_prefix_readout=True,
         )
-        self.frame_reliability = FrameReliabilityHead(
+        self.frame_reliability = StructuredFrameReliabilityHead(
             vggt_token_dim,
             frame_reliability_hidden_dim,
+            maximum_prefix_tokens=maximum_prefix_tokens,
             minimum=frame_reliability_minimum,
             maximum=frame_reliability_maximum,
         )
-        self.scale_frame_reliability = FrameReliabilityHead(
+        self.scale_frame_reliability = StructuredFrameReliabilityHead(
             vggt_token_dim,
             frame_reliability_hidden_dim,
+            maximum_prefix_tokens=maximum_prefix_tokens,
             minimum=frame_reliability_minimum,
             maximum=frame_reliability_maximum,
         )

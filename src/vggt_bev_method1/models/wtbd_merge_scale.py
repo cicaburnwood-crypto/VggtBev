@@ -54,12 +54,14 @@ class ImplicitGeometryContextTrunk(nn.Module):
         layers: int,
         maximum_history: int,
         maximum_prefix_tokens: int = 17,
+        structured_prefix_readout: bool = False,
     ) -> None:
         super().__init__()
         if layers <= 0 or maximum_history <= 0 or maximum_prefix_tokens <= 0:
             raise ValueError("implicit geometry trunk dimensions must be positive")
         self.maximum_history = int(maximum_history)
         self.maximum_prefix_tokens = int(maximum_prefix_tokens)
+        self.structured_prefix_readout = bool(structured_prefix_readout)
         self.input_projection = nn.Sequential(
             nn.LayerNorm(input_dim),
             nn.Linear(input_dim, hidden_dim),
@@ -75,6 +77,21 @@ class ImplicitGeometryContextTrunk(nn.Module):
             [ImplicitGeometryBlock(hidden_dim, heads) for _ in range(layers)]
         )
         self.output_norm = nn.LayerNorm(hidden_dim)
+        if self.structured_prefix_readout:
+            if maximum_prefix_tokens < 2:
+                raise ValueError(
+                    "structured prefix readout requires camera plus register tokens"
+                )
+            self.register_readout_norm = nn.LayerNorm(hidden_dim)
+            self.register_readout_score = nn.Linear(hidden_dim, 1, bias=False)
+            self.register_readout_type_bias = nn.Parameter(
+                torch.zeros(maximum_prefix_tokens - 1)
+            )
+            nn.init.zeros_(self.register_readout_score.weight)
+        else:
+            self.register_readout_norm = None
+            self.register_readout_score = None
+            self.register_readout_type_bias = None
         self.output_projection = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.GELU(),
@@ -83,6 +100,38 @@ class ImplicitGeometryContextTrunk(nn.Module):
         nn.init.normal_(self.frame_age_embedding, std=0.02)
         nn.init.normal_(self.prefix_type_embedding, std=0.02)
         nn.init.normal_(self.latest_reference_embedding, std=0.02)
+
+    def _readout_context(
+        self,
+        tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Read camera and register roles without conflating their identities."""
+
+        camera_context = tokens[:, :, 0]
+        if not self.structured_prefix_readout:
+            # Historical WTBD/P1D/M04 behavior is retained for checkpoint
+            # compatibility. M05 opts into the structured path below.
+            return camera_context, tokens.mean(dim=2)
+        if tokens.shape[2] < 2:
+            raise ValueError(
+                "structured prefix readout requires at least one register token"
+            )
+        if (
+            self.register_readout_norm is None
+            or self.register_readout_score is None
+            or self.register_readout_type_bias is None
+        ):
+            raise RuntimeError("structured prefix readout was not initialized")
+        registers = tokens[:, :, 1:]
+        score = self.register_readout_score(
+            self.register_readout_norm(registers)
+        ).squeeze(-1)
+        score = score + self.register_readout_type_bias[
+            : registers.shape[2]
+        ][None, None, :]
+        weight = torch.softmax(score.float(), dim=2).to(dtype=registers.dtype)
+        register_context = (registers * weight.unsqueeze(-1)).sum(dim=2)
+        return camera_context, register_context
 
     def forward(
         self,
@@ -133,8 +182,7 @@ class ImplicitGeometryContextTrunk(nn.Module):
         tokens = self.output_norm(
             tokens.reshape(batch, frames, prefix_count, -1)
         )
-        camera_context = tokens[:, :, 0]
-        register_context = tokens.mean(dim=2)
+        camera_context, register_context = self._readout_context(tokens)
         return self.output_projection(
             torch.cat((camera_context, register_context), dim=-1)
         )

@@ -5,6 +5,8 @@ full native 512 x 512 query table, anchors the map with the latest frame, and
 then applies one shared gated deformable update to history frames from newest
 to oldest. A training-only latest-frame auxiliary prediction uses the proven
 Single-Baseline map objective; runtime still returns only Merged BEV and Scale.
+Camera and register prefix tokens retain separate readout paths; register
+summaries use learned type-aware pooling instead of averaging all 17 tokens.
 
 It reuses the existing 512 x 512, 10 x 10 m Merged supervision and requires no
 new data collection. See `M05_IMPLEMENTATION.md` for the complete architecture,

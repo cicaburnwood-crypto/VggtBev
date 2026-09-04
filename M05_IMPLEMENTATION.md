@@ -26,6 +26,11 @@ M05 makes four linked changes:
    heads used by the final Merged output. The proven Single-Baseline map loss is
    applied to both outputs and averaged. Runtime does not expose or compute this
    auxiliary map.
+5. VGGT's one camera token and sixteen register tokens are never collapsed by a
+   shared 17-token mean. Camera remains an explicit feature; the register bank
+   uses learned content- and token-type-aware pooling for frame reliability and
+   implicit-geometry readout. Spatial patch tokens remain on their independent
+   multi-scale path.
 
 This is still one end-to-end forward call, not a persistent runtime recurrent
 map. The reverse loop is statically unrolled inside one RGB-window inference.

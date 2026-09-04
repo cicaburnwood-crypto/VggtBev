@@ -13,7 +13,12 @@ from vggt_bev_method1.cli_train_m05 import (
 )
 from vggt_bev_method1.m05_config import load_m05_config
 from vggt_bev_method1.m05_losses import m05_bev_loss, m05_loss_weights
-from vggt_bev_method1.models import DenseNativeQuery, M05System
+from vggt_bev_method1.models import (
+    DenseNativeQuery,
+    ImplicitGeometryContextTrunk,
+    M05System,
+    StructuredFrameReliabilityHead,
+)
 
 
 class _Adapter(nn.Module):
@@ -71,6 +76,8 @@ def test_m05_template_preserves_native_existing_gt_contract() -> None:
     assert config["model"]["merged_bev_output_size"] == 512
     assert config["model"]["full_per_pixel_query"]
     assert config["model"]["reverse_history_weight_sharing"]
+    assert config["model"]["structured_prefix_readout"]
+    assert config["model"]["structured_frame_reliability"]
     assert config["model"]["cross_query_chunk_size"] == 65536
     assert config["training"]["bev_objective"] == (
         "single_baseline_dual_supervision"
@@ -86,6 +93,51 @@ def test_dense_native_query_restores_one_content_vector_per_cell() -> None:
     )
     assert query.query_content.shape == (16 * 16, 8)
     assert query(3).shape == (3, 16 * 16, 8)
+
+
+def test_m05_reliability_keeps_camera_and_register_features_separate() -> None:
+    torch.manual_seed(3)
+    head = StructuredFrameReliabilityHead(
+        8,
+        4,
+        maximum_prefix_tokens=5,
+    ).eval()
+    tokens = torch.randn(2, 3, 5, 8)
+    original = head._structured_feature(tokens)
+
+    changed_camera = tokens.clone()
+    changed_camera[:, :, 0] += 10.0 * torch.randn_like(changed_camera[:, :, 0])
+    camera_feature = head._structured_feature(changed_camera)
+    assert not torch.allclose(camera_feature[..., :4], original[..., :4])
+    torch.testing.assert_close(camera_feature[..., 4:], original[..., 4:])
+
+    changed_registers = tokens.clone()
+    changed_registers[:, :, 1:] += 10.0 * torch.randn_like(
+        changed_registers[:, :, 1:]
+    )
+    register_feature = head._structured_feature(changed_registers)
+    torch.testing.assert_close(register_feature[..., :4], original[..., :4])
+    assert not torch.allclose(register_feature[..., 4:], original[..., 4:])
+
+
+def test_m05_geometry_readout_excludes_camera_from_register_pool() -> None:
+    trunk = ImplicitGeometryContextTrunk(
+        input_dim=8,
+        hidden_dim=8,
+        output_dim=8,
+        heads=2,
+        layers=1,
+        maximum_history=3,
+        maximum_prefix_tokens=5,
+        structured_prefix_readout=True,
+    ).eval()
+    tokens = torch.randn(2, 3, 5, 8)
+    camera, registers = trunk._readout_context(tokens)
+    changed = tokens.clone()
+    changed[:, :, 0] += 100.0
+    changed_camera, changed_registers = trunk._readout_context(changed)
+    assert not torch.allclose(changed_camera, camera)
+    torch.testing.assert_close(changed_registers, registers)
 
 
 def test_m05_is_latest_anchored_and_updates_history_newest_to_oldest() -> None:

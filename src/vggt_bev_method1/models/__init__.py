@@ -36,7 +36,13 @@ from .m04 import (
     M04System,
     ParallelQueryBranch,
 )
-from .m05 import DenseNativeQuery, M05Head, M05System, ReverseHistoryUpdate
+from .m05 import (
+    DenseNativeQuery,
+    M05Head,
+    M05System,
+    ReverseHistoryUpdate,
+    StructuredFrameReliabilityHead,
+)
 from .vggt_adapter import LiveVGGTOmegaAdapter
 from .wtbd_merge_scale import (
     DenseVGGTUnitQueryDecoder,
@@ -82,6 +88,7 @@ __all__ = [
     "ParallelQueryBranch",
     "DenseNativeQuery",
     "ReverseHistoryUpdate",
+    "StructuredFrameReliabilityHead",
     "M05Head",
     "M05System",
     "DenseVGGTUnitQueryDecoder",

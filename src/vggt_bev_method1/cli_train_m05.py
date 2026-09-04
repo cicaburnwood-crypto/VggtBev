@@ -101,6 +101,10 @@ def build_model(config: dict, device: torch.device) -> M05System:
         frame_reliability_minimum=float(values["frame_reliability_minimum"]),
         frame_reliability_maximum=float(values["frame_reliability_maximum"]),
         history_gate_initial_bias=float(values["history_gate_initial_bias"]),
+        structured_prefix_readout=bool(values["structured_prefix_readout"]),
+        structured_frame_reliability=bool(
+            values["structured_frame_reliability"]
+        ),
     ).to(device)
 
 

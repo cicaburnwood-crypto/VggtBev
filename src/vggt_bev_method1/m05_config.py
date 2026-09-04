@@ -10,7 +10,7 @@ except ModuleNotFoundError:
 
 
 PIPELINE_ID = "M05-LATEST-ANCHORED-REVERSE-GATED-MERGED-SCALE-NLL"
-CHECKPOINT_SCHEMA = "m05-reverse-gated-dense-query-merged-scale-512-v1"
+CHECKPOINT_SCHEMA = "m05-role-preserving-reverse-gated-merged-scale-512-v2"
 
 
 def load_m05_config(path: str | Path) -> dict[str, Any]:
@@ -72,6 +72,10 @@ def validate_m05_config(config: dict[str, Any]) -> None:
         raise ValueError("M05 requires the full-capacity native query table")
     if not bool(model.get("reverse_history_weight_sharing", False)):
         raise ValueError("M05 requires shared newest-to-oldest history updates")
+    if not bool(model.get("structured_prefix_readout", False)):
+        raise ValueError("M05 must keep camera/register readout roles separate")
+    if not bool(model.get("structured_frame_reliability", False)):
+        raise ValueError("M05 frame reliability must preserve prefix-token roles")
     for key in (
         "hidden_dim",
         "attention_heads",
