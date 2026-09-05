@@ -19,9 +19,6 @@ from vggt_bev_method1.cli_train_metric import (
     learning_rate_factor,
     scale_fit_config,
 )
-from vggt_bev_method1.data.vggt_unit_targets import (
-    regrid_merged_metric_targets_to_vggt_units,
-)
 from vggt_bev_method1.m04_losses import m04_scale_loss
 from vggt_bev_method1.m05_config import (
     CHECKPOINT_SCHEMA,
@@ -29,7 +26,11 @@ from vggt_bev_method1.m05_config import (
     load_m05_config,
 )
 from vggt_bev_method1.m05_losses import m05_bev_loss, m05_loss_weights
-from vggt_bev_method1.m05_train_utils import build_m05_datasets, m05_collate
+from vggt_bev_method1.m05_train_utils import (
+    build_m05_datasets,
+    fixed_metric_m05_target,
+    m05_collate,
+)
 from vggt_bev_method1.models import LiveVGGTOmegaAdapter, M05System
 from vggt_bev_method1.train_utils import (
     distributed_runtime,
@@ -86,7 +87,7 @@ def build_model(config: dict, device: torch.device) -> M05System:
         deformable_samples=int(values["deformable_samples"]),
         cross_query_chunk_size=int(values["cross_query_chunk_size"]),
         merged_bev_size=int(values["merged_bev_output_size"]),
-        merged_extent_vggt=float(values["merged_bev_extent_vggt"]),
+        merged_extent_m=float(values["merged_bev_extent_m"]),
         query_fourier_bands=int(values["query_fourier_bands"]),
         refinement_layers=int(values["refinement_layers"]),
         predict_scale_uncertainty=bool(
@@ -110,21 +111,16 @@ def build_model(config: dict, device: torch.device) -> M05System:
 
 def _target(
     batch: dict,
-    scale_target: dict,
     config: dict,
     *,
     prefix: str,
 ) -> dict[str, torch.Tensor]:
-    return regrid_merged_metric_targets_to_vggt_units(
+    return fixed_metric_m05_target(
         batch[f"{prefix}_fov_complete_target"],
         batch[f"{prefix}_visible_target"],
         batch[f"{prefix}_fov_support_target"],
         batch[f"{prefix}_gt_valid_mask"],
-        scale_target["lambda_gt"],
-        scale_target["target_valid"],
-        source_extent_m=float(config["data"]["merged_source_extent_m"]),
-        target_extent_vggt=float(config["model"]["merged_bev_extent_vggt"]),
-        target_size=int(config["model"]["merged_bev_output_size"]),
+        extent_m=float(config["model"]["merged_bev_extent_m"]),
     )
 
 
@@ -160,21 +156,8 @@ def _forward_losses(
         include_latest_auxiliary=True,
         assemble_runtime_outputs=False,
     )
-    merged_target = _target(batch, scale_target, config, prefix="merged")
-    latest_target = _target(batch, scale_target, config, prefix="latest")
-    merged_valid_scale = scale_target["target_valid"].bool()
-    valid_scale_coverage = (
-        merged_target["source_coverage_fraction"]
-        * merged_valid_scale.to(merged_target["source_coverage_fraction"].dtype)
-    ).sum() / merged_valid_scale.sum().clamp_min(1).to(
-        merged_target["source_coverage_fraction"].dtype
-    )
-    minimum_coverage = float(training.get("minimum_mean_source_coverage", 0.0))
-    if minimum_coverage > 0.0 and float(valid_scale_coverage.detach()) < minimum_coverage:
-        raise RuntimeError(
-            "M05 valid-scale 10 m source coverage fell below threshold: "
-            f"{float(valid_scale_coverage.detach()):.6f} < {minimum_coverage:.6f}"
-        )
+    merged_target = _target(batch, config, prefix="merged")
+    latest_target = _target(batch, config, prefix="latest")
     bev = m05_bev_loss(
         prediction["merged_bev"],
         prediction["latest_auxiliary_bev"],
@@ -196,7 +179,13 @@ def _forward_losses(
             training["hidden_occupied_ramp_fraction"]
         ),
         latest_auxiliary_weight=float(
-            training.get("latest_auxiliary_loss_weight", 0.50)
+            training.get(
+                "latest_auxiliary_multiplier",
+                training.get("latest_auxiliary_loss_weight", 0.50),
+            )
+        ),
+        loss_combination=str(
+            training.get("latest_auxiliary_loss_mode", "convex")
         ),
     )
     scale = m04_scale_loss(
@@ -212,19 +201,16 @@ def _forward_losses(
     values = {
         **{f"bev_{key}": value for key, value in bev.items()},
         **{f"scale_{key}": value for key, value in scale.items()},
-        "target_source_coverage_fraction": merged_target[
-            "source_coverage_fraction"
+        "target_coordinate_coverage_fraction": merged_target[
+            "coordinate_coverage_fraction"
         ].mean(),
-        "target_valid_scale_source_coverage_fraction": valid_scale_coverage,
         "target_effective_supervision_fraction": merged_target[
             "gt_valid_mask"
         ].float().mean(),
         "latest_effective_supervision_fraction": latest_target[
             "gt_valid_mask"
         ].float().mean(),
-        "target_effective_metric_extent_gt": merged_target[
-            "effective_metric_extent_gt"
-        ].mean(),
+        "target_metric_extent_m": merged_target["metric_extent_m"].mean(),
         "history_update_gate_mean": gate_mean,
         "frame_reliability_mean": prediction["frame_reliability"].float().mean(),
         "scale_frame_reliability_mean": prediction[
@@ -235,21 +221,40 @@ def _forward_losses(
     return total, values
 
 
-def _contract(config: dict, manifest_sha256: str, vggt_sha256: str) -> dict:
+def _contract(
+    config: dict,
+    manifest_sha256: str,
+    vggt_sha256: str,
+    *,
+    pipeline_id: str = PIPELINE_ID,
+    checkpoint_schema: str = CHECKPOINT_SCHEMA,
+) -> dict:
     model = config["model"]
     data = config["data"]
+    half_extent = float(model["merged_bev_extent_m"]) / 2.0
     return {
-        "pipeline_id": PIPELINE_ID,
-        "checkpoint_schema": CHECKPOINT_SCHEMA,
+        "pipeline_id": pipeline_id,
+        "checkpoint_schema": checkpoint_schema,
         "manifest_sha256": manifest_sha256,
         "vggt_checkpoint_sha256": vggt_sha256,
         "single_bev_present": False,
         "latest_auxiliary_training_only": True,
-        "merged_coordinate_mode": "vggt_native_units",
-        "merged_extent_vggt": float(model["merged_bev_extent_vggt"]),
+        "merged_coordinate_mode": "fixed_metric",
+        "merged_extent_m": float(model["merged_bev_extent_m"]),
+        "merged_bounds_m": [
+            -half_extent,
+            half_extent,
+            -half_extent,
+            half_extent,
+        ],
+        "merged_cell_size_m": (
+            float(model["merged_bev_extent_m"])
+            / int(model["merged_bev_output_size"])
+        ),
         "merged_output_size": int(model["merged_bev_output_size"]),
         "merged_source_extent_m": float(data["merged_source_extent_m"]),
-        "source_outside_loss_policy": "hard_ignore",
+        "bev_scale_dependency": "none",
+        "void_invalid_loss_policy": "hard_ignore",
         "scale_unit": "meter_per_vggt_runtime_unit",
         "scale_is_merged_input": False,
         "geometry_conditioning": "latest_anchor_reverse_gated_history",
@@ -268,8 +273,10 @@ def _save_checkpoint(
     path: Path,
     *,
     model: M05System,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    bev_optimizer: torch.optim.Optimizer,
+    scale_optimizer: torch.optim.Optimizer,
+    bev_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    scale_scheduler: torch.optim.lr_scheduler.LRScheduler,
     config: dict,
     contract: dict,
     epoch: int,
@@ -281,16 +288,18 @@ def _save_checkpoint(
     torch.save(
         {
             **contract,
-            "format_version": 1,
+            "format_version": 2,
             "epoch": epoch,
             "global_step": global_step,
             "batch_in_epoch": batch_in_epoch,
             "config": config,
             "head": model.unwrapped_head().state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
+            "bev_optimizer": bev_optimizer.state_dict(),
+            "scale_optimizer": scale_optimizer.state_dict(),
+            "bev_scheduler": bev_scheduler.state_dict(),
+            "scale_scheduler": scale_scheduler.state_dict(),
             "trained_outputs": [
-                "merged_bev_vggt_units",
+                "merged_bev_fixed_10m",
                 "merged_confidence",
                 "fov_support",
                 "observed_gate",
@@ -309,8 +318,10 @@ def _load_checkpoint(
     path: Path,
     *,
     model: M05System,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    bev_optimizer: torch.optim.Optimizer,
+    scale_optimizer: torch.optim.Optimizer,
+    bev_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    scale_scheduler: torch.optim.lr_scheduler.LRScheduler,
     contract: dict,
 ) -> tuple[int, int, int]:
     state = torch.load(
@@ -320,8 +331,10 @@ def _load_checkpoint(
         if state.get(key) != expected:
             raise ValueError(f"M05 resume contract mismatch for {key}")
     model.unwrapped_head().load_state_dict(state["head"], strict=True)
-    optimizer.load_state_dict(state["optimizer"])
-    scheduler.load_state_dict(state["scheduler"])
+    bev_optimizer.load_state_dict(state["bev_optimizer"])
+    scale_optimizer.load_state_dict(state["scale_optimizer"])
+    bev_scheduler.load_state_dict(state["bev_scheduler"])
+    scale_scheduler.load_state_dict(state["scale_scheduler"])
     return (
         int(state["epoch"]),
         int(state["global_step"]),
@@ -374,9 +387,17 @@ def _validate(
     return {key: value / max(count, 1) for key, value in totals.items()}
 
 
-def main() -> None:
+def run_training(
+    *,
+    config_loader=load_m05_config,
+    model_builder=build_model,
+    pipeline_id: str = PIPELINE_ID,
+    checkpoint_schema: str = CHECKPOINT_SCHEMA,
+    checkpoint_prefix: str = "m05",
+    contract_builder=None,
+) -> None:
     arguments = parse_args()
-    config = load_m05_config(arguments.config)
+    config = config_loader(arguments.config)
     training = config["training"]
     seed_everything(int(training["seed"]))
     train_dataset, validation_dataset = build_m05_datasets(config)
@@ -384,7 +405,7 @@ def main() -> None:
         print(
             json.dumps(
                 {
-                    "pipeline": PIPELINE_ID,
+                    "pipeline": pipeline_id,
                     "train_samples": len(train_dataset),
                     "validation_samples": len(validation_dataset),
                     "source_gt": (
@@ -403,7 +424,7 @@ def main() -> None:
         training
     )
     primary = rank == 0
-    model = build_model(config, device)
+    model = model_builder(config, device)
     for parameter in model.unwrapped_head().parameters():
         parameter.requires_grad_(True)
     compilation = _configure_head_compilation(model, training)
@@ -421,7 +442,6 @@ def main() -> None:
         for name, parameter in model.unwrapped_head().named_parameters()
         if parameter.requires_grad
     ]
-    trainable = [parameter for _, parameter in named_trainable]
     scale_prefixes = (
         "scale_token_projector.",
         "scale_frame_reliability.",
@@ -437,12 +457,13 @@ def main() -> None:
         for name, parameter in named_trainable
         if not name.startswith(scale_prefixes)
     ]
-    optimizer = torch.optim.AdamW(
-        trainable,
+    optimizer_arguments = dict(
         lr=float(training["learning_rate"]),
         weight_decay=float(training.get("weight_decay", 0.02)),
         fused=device.type == "cuda" and bool(training.get("fused_optimizer", True)),
     )
+    bev_optimizer = torch.optim.AdamW(bev_trainable, **optimizer_arguments)
+    scale_optimizer = torch.optim.AdamW(scale_trainable, **optimizer_arguments)
     sampler = EpochOffsetSampler(
         _sampler(
             train_dataset,
@@ -484,22 +505,32 @@ def main() -> None:
         **worker_options,
     )
     total_steps = max(1, len(loader) * int(training["epochs"]))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
+    bev_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        bev_optimizer,
         lambda step: learning_rate_factor(step, total_steps, training),
     )
-    contract = _contract(
+    scale_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        scale_optimizer,
+        lambda step: learning_rate_factor(step, total_steps, training),
+    )
+    if contract_builder is None:
+        contract_builder = _contract
+    contract = contract_builder(
         config,
         _base_dataset(train_dataset).split_manifest_sha256,
         _sha256(config["model"]["checkpoint"]),
+        pipeline_id=pipeline_id,
+        checkpoint_schema=checkpoint_schema,
     )
     start_epoch = global_step = batch_offset = 0
     if arguments.resume is not None:
         start_epoch, global_step, batch_offset = _load_checkpoint(
             arguments.resume,
             model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
+            bev_optimizer=bev_optimizer,
+            scale_optimizer=scale_optimizer,
+            bev_scheduler=bev_scheduler,
+            scale_scheduler=scale_scheduler,
             contract=contract,
         )
     output_dir = Path(training["output_dir"]).expanduser().resolve()
@@ -522,6 +553,8 @@ def main() -> None:
                     "runtime_forward_passes": 1,
                     "history_update_weight_sharing": True,
                     "separate_bev_scale_gradient_clipping": True,
+                    "separate_bev_scale_optimizers": True,
+                    "scale_default_runtime_output": False,
                     "head_compilation": compilation,
                 }
             ),
@@ -538,7 +571,8 @@ def main() -> None:
         for batch_index, batch in enumerate(loader, start=offset):
             batch_started = time.monotonic()
             batch = move_batch(batch, device)
-            optimizer.zero_grad(set_to_none=True)
+            bev_optimizer.zero_grad(set_to_none=True)
+            scale_optimizer.zero_grad(set_to_none=True)
             use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
             with torch.autocast(
                 device_type=device.type,
@@ -558,8 +592,10 @@ def main() -> None:
             clip = float(training["gradient_clip_norm"])
             torch.nn.utils.clip_grad_norm_(bev_trainable, clip, foreach=True)
             torch.nn.utils.clip_grad_norm_(scale_trainable, clip, foreach=True)
-            optimizer.step()
-            scheduler.step()
+            bev_optimizer.step()
+            scale_optimizer.step()
+            bev_scheduler.step()
+            scale_scheduler.step()
             global_step += 1
             if primary and global_step % int(training["log_every_steps"]) == 0:
                 print(
@@ -569,7 +605,8 @@ def main() -> None:
                             "step": global_step,
                             "batch_seconds": time.monotonic() - batch_started,
                             "elapsed_seconds": time.monotonic() - started,
-                            "learning_rate": scheduler.get_last_lr()[0],
+                            "bev_learning_rate": bev_scheduler.get_last_lr()[0],
+                            "scale_learning_rate": scale_scheduler.get_last_lr()[0],
                             **{
                                 key: float(value.detach().cpu())
                                 for key, value in values.items()
@@ -580,10 +617,12 @@ def main() -> None:
                 )
             if primary and global_step % int(training["checkpoint_every_steps"]) == 0:
                 _save_checkpoint(
-                    output_dir / f"m05_step_{global_step:08d}.pt",
+                    output_dir / f"{checkpoint_prefix}_step_{global_step:08d}.pt",
                     model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
+                    bev_optimizer=bev_optimizer,
+                    scale_optimizer=scale_optimizer,
+                    bev_scheduler=bev_scheduler,
+                    scale_scheduler=scale_scheduler,
                     config=config,
                     contract=contract,
                     epoch=epoch,
@@ -607,10 +646,12 @@ def main() -> None:
                 print(json.dumps({"epoch": epoch + 1, "validation": metrics}), flush=True)
         if primary:
             _save_checkpoint(
-                output_dir / "m05_latest.pt",
+                output_dir / f"{checkpoint_prefix}_latest.pt",
                 model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
+                bev_optimizer=bev_optimizer,
+                scale_optimizer=scale_optimizer,
+                bev_scheduler=bev_scheduler,
+                scale_scheduler=scale_scheduler,
                 config=config,
                 contract=contract,
                 epoch=epoch + 1,
@@ -623,6 +664,10 @@ def main() -> None:
             break
     if distributed:
         dist.destroy_process_group()
+
+
+def main() -> None:
+    run_training()
 
 
 if __name__ == "__main__":

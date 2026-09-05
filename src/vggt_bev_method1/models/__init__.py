@@ -1,3 +1,26 @@
+from .m04 import (
+    FactorizedNativeQuery,
+    M04Head,
+    M04System,
+    ParallelQueryBranch,
+)
+from .m05 import (
+    DenseNativeQuery,
+    M05Head,
+    M05System,
+    ReverseHistoryUpdate,
+    StructuredFrameReliabilityHead,
+)
+from .m05_plus import (
+    DPTLiteLocalGlobalPyramid,
+    M05PlusHead,
+    M05PlusSystem,
+    PerCellPrefixReader,
+    PerQueryTemporalAttention,
+    ProjectedDenseMetricQuery,
+    RoleSeparatedPrefixTrunk,
+    TemporalFrameProposal,
+)
 from .method1 import (
     FixedMetricBEVDecoder,
     Method1Head,
@@ -30,19 +53,6 @@ from .p1c import (
     compose_se2_residual,
 )
 from .p1d import FrameReliabilityHead, P1DHead, P1DSystem
-from .m04 import (
-    FactorizedNativeQuery,
-    M04Head,
-    M04System,
-    ParallelQueryBranch,
-)
-from .m05 import (
-    DenseNativeQuery,
-    M05Head,
-    M05System,
-    ReverseHistoryUpdate,
-    StructuredFrameReliabilityHead,
-)
 from .vggt_adapter import LiveVGGTOmegaAdapter
 from .wtbd_merge_scale import (
     DenseVGGTUnitQueryDecoder,
@@ -91,6 +101,14 @@ __all__ = [
     "StructuredFrameReliabilityHead",
     "M05Head",
     "M05System",
+    "DPTLiteLocalGlobalPyramid",
+    "M05PlusHead",
+    "M05PlusSystem",
+    "PerCellPrefixReader",
+    "PerQueryTemporalAttention",
+    "ProjectedDenseMetricQuery",
+    "RoleSeparatedPrefixTrunk",
+    "TemporalFrameProposal",
     "DenseVGGTUnitQueryDecoder",
     "ImplicitGeometryBlock",
     "ImplicitGeometryContextTrunk",

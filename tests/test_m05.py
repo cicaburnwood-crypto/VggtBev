@@ -13,6 +13,7 @@ from vggt_bev_method1.cli_train_m05 import (
 )
 from vggt_bev_method1.m05_config import load_m05_config
 from vggt_bev_method1.m05_losses import m05_bev_loss, m05_loss_weights
+from vggt_bev_method1.m05_train_utils import fixed_metric_m05_target
 from vggt_bev_method1.models import (
     DenseNativeQuery,
     ImplicitGeometryContextTrunk,
@@ -45,7 +46,7 @@ def _model(
         deformable_samples=2,
         cross_query_chunk_size=cross_query_chunk_size,
         merged_bev_size=8,
-        merged_extent_vggt=6.5,
+        merged_extent_m=10.0,
         query_fourier_bands=2,
         refinement_layers=1,
         predict_scale_uncertainty=True,
@@ -71,9 +72,12 @@ def test_m05_template_preserves_native_existing_gt_contract() -> None:
     root = Path(__file__).resolve().parents[1]
     config = load_m05_config(root / "configs/m05_reverse_gated_10m_template.toml")
     assert config["data"]["merged_source_extent_m"] == 10.0
+    assert config["data"]["coordinate_mode"] == "fixed_metric"
     assert config["data"]["merged_source_image_size"] == 512
     assert config["data"]["merged_source_output_size"] == 512
     assert config["model"]["merged_bev_output_size"] == 512
+    assert config["model"]["merged_bev_extent_m"] == 10.0
+    assert "merged_bev_extent_vggt" not in config["model"]
     assert config["model"]["full_per_pixel_query"]
     assert config["model"]["reverse_history_weight_sharing"]
     assert config["model"]["structured_prefix_readout"]
@@ -87,7 +91,7 @@ def test_m05_template_preserves_native_existing_gt_contract() -> None:
 def test_dense_native_query_restores_one_content_vector_per_cell() -> None:
     query = DenseNativeQuery(
         size=16,
-        extent_vggt=6.5,
+        extent_m=10.0,
         hidden_dim=8,
         fourier_bands=2,
     )
@@ -163,12 +167,17 @@ def test_m05_is_latest_anchored_and_updates_history_newest_to_oldest() -> None:
     assert not four["latest_auxiliary_runtime_output"]
     assert not four["extrinsic_input_present"]
     assert not four["camera_height_input_present"]
+    assert four["coordinate_mode"] == "fixed_metric"
+    assert four["merged_extent_m"] == 10.0
+    assert four["merged_bounds_m"] == (-5.0, 5.0, -5.0, 5.0)
 
 
 def test_latest_auxiliary_is_training_only_and_shares_native_head() -> None:
     model = _model().eval()
     runtime = model.forward_head(_extraction(3))
     assert "latest_auxiliary_bev" not in runtime
+    assert "scale" not in runtime
+    assert not runtime["scale_output_present"]
     training = model.forward_head(
         _extraction(3),
         include_latest_auxiliary=True,
@@ -200,14 +209,29 @@ def test_scale_parameters_cannot_change_m05_bev() -> None:
     torch.testing.assert_close(after, before)
 
 
+def test_scale_is_explicitly_opt_in_at_runtime() -> None:
+    model = _model().eval()
+    extraction = _extraction(2)
+    default = model.forward_head(extraction)
+    requested = model.forward_head(extraction, include_scale=True)
+    assert "scale" not in default
+    assert not default["scale_output_present"]
+    assert "scale" in requested
+    assert requested["scale_output_present"]
+    torch.testing.assert_close(
+        default["merged_bev"]["occupancy_probability"],
+        requested["merged_bev"]["occupancy_probability"],
+    )
+
+
 def test_query_chunk_optimization_preserves_predictions() -> None:
     torch.manual_seed(9)
     small_chunks = _model(cross_query_chunk_size=4).eval()
     large_chunks = _model(cross_query_chunk_size=64).eval()
     large_chunks.load_state_dict(small_chunks.state_dict(), strict=True)
     extraction = _extraction(3)
-    small = small_chunks.forward_head(extraction)
-    large = large_chunks.forward_head(extraction)
+    small = small_chunks.forward_head(extraction, include_scale=True)
+    large = large_chunks.forward_head(extraction, include_scale=True)
     torch.testing.assert_close(
         large["merged_bev"]["occupancy_probability"],
         small["merged_bev"]["occupancy_probability"],
@@ -231,6 +255,24 @@ def _target() -> dict[str, torch.Tensor]:
         "support_target": support,
         "gt_valid_mask": torch.ones_like(support),
     }
+
+
+def test_fixed_metric_target_is_identity_and_independent_of_scale() -> None:
+    source = _target()
+    target = fixed_metric_m05_target(
+        source["complete_target"],
+        source["visible_target"],
+        source["support_target"],
+        source["gt_valid_mask"],
+        extent_m=10.0,
+    )
+    torch.testing.assert_close(target["complete_target"], source["complete_target"])
+    torch.testing.assert_close(target["visible_target"], source["visible_target"])
+    torch.testing.assert_close(target["support_target"], source["support_target"])
+    torch.testing.assert_close(target["gt_valid_mask"], source["gt_valid_mask"])
+    assert bool((target["coordinate_coverage_fraction"] == 1.0).all())
+    assert bool((target["metric_extent_m"] == 10.0).all())
+    assert bool((target["cell_size_m_gt"] == 1.25).all())
 
 
 def test_m05_dual_single_loss_backpropagates_latest_and_history() -> None:
@@ -297,10 +339,75 @@ def test_m05_dual_loss_supports_a_convex_diagnostic_mix() -> None:
         )
 
 
+def test_m05_plus_additive_loss_keeps_merged_temporal_gradient_at_unit_weight() -> None:
+    model = _model().train()
+    prediction = model.forward_head(
+        _extraction(3),
+        include_scale=False,
+        include_latest_auxiliary=True,
+        assemble_runtime_outputs=False,
+    )
+    result = m05_bev_loss(
+        prediction["merged_bev"],
+        prediction["latest_auxiliary_bev"],
+        _target(),
+        _target(),
+        weights=m05_loss_weights({}),
+        global_step=10,
+        total_steps=100,
+        latest_auxiliary_weight=0.10,
+        loss_combination="merged_primary_additive",
+    )
+    torch.testing.assert_close(
+        result["loss"],
+        result["merged_loss"] + 0.10 * result["latest_auxiliary_loss"],
+    )
+    torch.testing.assert_close(
+        result["merged_loss_weight"],
+        result["loss"].new_tensor(1.0),
+    )
+    temporal_parameter = model.head.history_updates[0].gate_bias
+    total_gradient = torch.autograd.grad(
+        result["loss"], temporal_parameter, retain_graph=True
+    )[0]
+    merged_gradient = torch.autograd.grad(
+        result["merged_loss"], temporal_parameter
+    )[0]
+    torch.testing.assert_close(total_gradient, merged_gradient)
+
+
+def test_m05_plus_zero_latest_multiplier_equals_merged_only() -> None:
+    model = _model().train()
+    prediction = model.forward_head(
+        _extraction(3),
+        include_scale=False,
+        include_latest_auxiliary=True,
+        assemble_runtime_outputs=False,
+    )
+    result = m05_bev_loss(
+        prediction["merged_bev"],
+        prediction["latest_auxiliary_bev"],
+        _target(),
+        _target(),
+        weights=m05_loss_weights({}),
+        global_step=10,
+        total_steps=100,
+        latest_auxiliary_weight=0.0,
+        loss_combination="merged_primary_additive",
+    )
+    torch.testing.assert_close(result["loss"], result["merged_loss"])
+
+
 def test_m05_checkpoint_roundtrip_is_strict(tmp_path: Path) -> None:
     model = _model()
-    optimizer = torch.optim.AdamW(model.head.parameters(), lr=1e-4)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    named = list(model.head.named_parameters())
+    scale_prefixes = ("scale_token_projector.", "scale_frame_reliability.", "scale_decoder.")
+    bev_parameters = [value for name, value in named if not name.startswith(scale_prefixes)]
+    scale_parameters = [value for name, value in named if name.startswith(scale_prefixes)]
+    bev_optimizer = torch.optim.AdamW(bev_parameters, lr=1e-4)
+    scale_optimizer = torch.optim.AdamW(scale_parameters, lr=1e-4)
+    bev_scheduler = torch.optim.lr_scheduler.LambdaLR(bev_optimizer, lambda _: 1.0)
+    scale_scheduler = torch.optim.lr_scheduler.LambdaLR(scale_optimizer, lambda _: 1.0)
     contract = {
         "pipeline_id": model.head.pipeline_id,
         "checkpoint_schema": "unit-m05",
@@ -314,8 +421,10 @@ def test_m05_checkpoint_roundtrip_is_strict(tmp_path: Path) -> None:
     _save_checkpoint(
         path,
         model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
+        bev_optimizer=bev_optimizer,
+        scale_optimizer=scale_optimizer,
+        bev_scheduler=bev_scheduler,
+        scale_scheduler=scale_scheduler,
         config={"test": True},
         contract=contract,
         epoch=3,
@@ -328,8 +437,10 @@ def test_m05_checkpoint_roundtrip_is_strict(tmp_path: Path) -> None:
     assert _load_checkpoint(
         path,
         model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
+        bev_optimizer=bev_optimizer,
+        scale_optimizer=scale_optimizer,
+        bev_scheduler=bev_scheduler,
+        scale_scheduler=scale_scheduler,
         contract=contract,
     ) == (3, 17, 5)
     for name, value in model.head.state_dict().items():
@@ -338,8 +449,10 @@ def test_m05_checkpoint_roundtrip_is_strict(tmp_path: Path) -> None:
         _load_checkpoint(
             path,
             model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
+            bev_optimizer=bev_optimizer,
+            scale_optimizer=scale_optimizer,
+            bev_scheduler=bev_scheduler,
+            scale_scheduler=scale_scheduler,
             contract={**contract, "checkpoint_schema": "wrong"},
         )
 
@@ -349,6 +462,9 @@ def test_m05_contract_has_no_runtime_gt_or_navigation() -> None:
     config = load_m05_config(root / "configs/m05_reverse_gated_10m_template.toml")
     contract = _contract(config, "manifest", "vggt")
     assert contract["runtime_external_inputs"] == ["rgb_window"]
+    assert contract["merged_coordinate_mode"] == "fixed_metric"
+    assert contract["merged_extent_m"] == 10.0
+    assert contract["bev_scale_dependency"] == "none"
     assert contract["history_order"] == "newest_to_oldest_after_latest_anchor"
     assert contract["latest_auxiliary_training_only"]
     assert not contract["extrinsic_input_present"]

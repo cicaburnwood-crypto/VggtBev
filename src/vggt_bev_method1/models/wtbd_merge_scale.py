@@ -55,6 +55,7 @@ class ImplicitGeometryContextTrunk(nn.Module):
         maximum_history: int,
         maximum_prefix_tokens: int = 17,
         structured_prefix_readout: bool = False,
+        latest_first: bool = False,
     ) -> None:
         super().__init__()
         if layers <= 0 or maximum_history <= 0 or maximum_prefix_tokens <= 0:
@@ -62,6 +63,7 @@ class ImplicitGeometryContextTrunk(nn.Module):
         self.maximum_history = int(maximum_history)
         self.maximum_prefix_tokens = int(maximum_prefix_tokens)
         self.structured_prefix_readout = bool(structured_prefix_readout)
+        self.latest_first = bool(latest_first)
         self.input_projection = nn.Sequential(
             nn.LayerNorm(input_dim),
             nn.Linear(input_dim, hidden_dim),
@@ -147,11 +149,10 @@ class ImplicitGeometryContextTrunk(nn.Module):
         if prefix_count > self.maximum_prefix_tokens:
             raise ValueError("prefix token count exceeds configured maximum")
         tokens = self.input_projection(prefix_tokens)
-        frame_age = torch.arange(
-            frames - 1,
-            -1,
-            -1,
-            device=tokens.device,
+        frame_age = (
+            torch.arange(frames, device=tokens.device)
+            if self.latest_first
+            else torch.arange(frames - 1, -1, -1, device=tokens.device)
         )
         tokens = (
             tokens
@@ -159,7 +160,10 @@ class ImplicitGeometryContextTrunk(nn.Module):
             + self.prefix_type_embedding[:prefix_count][None, None, :, :]
         )
         tokens = tokens.clone()
-        tokens[:, -1] = tokens[:, -1] + self.latest_reference_embedding
+        latest_index = 0 if self.latest_first else -1
+        tokens[:, latest_index] = (
+            tokens[:, latest_index] + self.latest_reference_embedding
+        )
         tokens = tokens.reshape(batch, frames * prefix_count, -1)
         prefix_reliability = None
         if frame_reliability is not None:

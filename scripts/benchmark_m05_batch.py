@@ -3,15 +3,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from types import MethodType
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 
+from vggt_bev_method1.cli_train_m05 import _forward_losses
+from vggt_bev_method1.cli_train_m05 import build_model as build_m05_model
+from vggt_bev_method1.cli_train_m05_plus import build_model as build_m05_plus_model
 from vggt_bev_method1.cli_train_metric import _configure_head_compilation
-from vggt_bev_method1.cli_train_m05 import _forward_losses, build_model
 from vggt_bev_method1.m05_config import load_m05_config
+from vggt_bev_method1.m05_plus_config import load_m05_plus_config
 from vggt_bev_method1.m05_train_utils import build_m05_datasets, m05_collate
 from vggt_bev_method1.train_utils import move_batch
 
@@ -37,6 +43,30 @@ def main() -> None:
         description="Short real-data M05 forward/backward benchmark without checkpoints"
     )
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument(
+        "--m05-plus",
+        action="store_true",
+        help="Load the M05+ contract and model instead of the legacy M05 model",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        help="Override the configured dataset root for a diagnostic manifest",
+    )
+    parser.add_argument(
+        "--split-manifest",
+        type=Path,
+        help="Override the configured split manifest for a diagnostic run",
+    )
+    parser.add_argument(
+        "--session-selection-order",
+        help="Override the configured session order for a diagnostic manifest",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        help="Override the configured split seed for a diagnostic manifest",
+    )
     parser.add_argument("--batch-size", required=True, type=int)
     parser.add_argument("--history", required=True, type=int)
     parser.add_argument("--steps", type=int, default=3)
@@ -54,7 +84,20 @@ def main() -> None:
     if not 0.0 <= args.attention_checkpoint_fraction <= 1.0:
         raise ValueError("attention checkpoint fraction must be in [0,1]")
 
-    config = load_m05_config(args.config)
+    if args.m05_plus:
+        config = load_m05_plus_config(args.config)
+        build_model = build_m05_plus_model
+    else:
+        config = load_m05_config(args.config)
+        build_model = build_m05_model
+    if args.data_root is not None:
+        config["data"]["root"] = str(args.data_root)
+    if args.split_manifest is not None:
+        config["data"]["split_manifest"] = str(args.split_manifest)
+    if args.session_selection_order is not None:
+        config["data"]["session_selection_order"] = args.session_selection_order
+    if args.split_seed is not None:
+        config["data"]["split_seed"] = args.split_seed
     if args.query_chunk_size is not None:
         if args.query_chunk_size <= 0:
             raise ValueError("query chunk size must be positive")
@@ -63,11 +106,17 @@ def main() -> None:
     # stack is not stable, and eager BF16 is the production-safe comparison.
     config["training"]["compile_head"] = False
 
-    train_dataset, _ = build_m05_datasets(config)
+    train_dataset, _ = build_m05_datasets(config, verify_manifest=False)
     sample = _sample_with_history(train_dataset, args.history)
     batch = m05_collate([sample for _ in range(args.batch_size)])
-    device = torch.device("cuda:0")
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    distributed = world_size > 1
+    device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
+    if distributed:
+        dist.init_process_group(backend="nccl")
+    primary = not distributed or dist.get_rank() == 0
     model = build_model(config, device)
     for parameter in model.unwrapped_head().parameters():
         parameter.requires_grad_(True)
@@ -82,6 +131,14 @@ def main() -> None:
             )
             deformable_attention_modules += 1
     compilation = _configure_head_compilation(model, config["training"])
+    if distributed:
+        model.head = DistributedDataParallel(
+            model.head,
+            device_ids=[device.index],
+            broadcast_buffers=False,
+            gradient_as_bucket_view=True,
+            find_unused_parameters=True,
+        )
 
     named_trainable = list(model.unwrapped_head().named_parameters())
     scale_prefixes = (
@@ -125,22 +182,46 @@ def main() -> None:
             original_teacher = model.decode_scale_teacher
             original_head = model.forward_head
 
-            def timed_extract(_self, *call_args, **call_kwargs):
+            def timed_extract(
+                _self,
+                *call_args,
+                _original=original_extract,
+                **call_kwargs,
+            ):
                 return _timed_cuda_call(
-                    component_seconds, "vggt_aggregate", original_extract,
-                    *call_args, **call_kwargs,
+                    component_seconds,
+                    "vggt_aggregate",
+                    _original,
+                    *call_args,
+                    **call_kwargs,
                 )
 
-            def timed_teacher(_self, *call_args, **call_kwargs):
+            def timed_teacher(
+                _self,
+                *call_args,
+                _original=original_teacher,
+                **call_kwargs,
+            ):
                 return _timed_cuda_call(
-                    component_seconds, "vggt_depth_teacher", original_teacher,
-                    *call_args, **call_kwargs,
+                    component_seconds,
+                    "vggt_depth_teacher",
+                    _original,
+                    *call_args,
+                    **call_kwargs,
                 )
 
-            def timed_head(_self, *call_args, **call_kwargs):
+            def timed_head(
+                _self,
+                *call_args,
+                _original=original_head,
+                **call_kwargs,
+            ):
                 return _timed_cuda_call(
-                    component_seconds, "m05_head", original_head,
-                    *call_args, **call_kwargs,
+                    component_seconds,
+                    "m05_head",
+                    _original,
+                    *call_args,
+                    **call_kwargs,
                 )
 
             model.extract = MethodType(timed_extract, model)
@@ -192,25 +273,27 @@ def main() -> None:
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - started
         step_seconds.append(elapsed)
-        print(
-            json.dumps(
-                {
-                    "event": "step",
-                    "step": step + 1,
-                    "seconds": elapsed,
-                    "loss": float(loss.detach().cpu()),
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
+        if primary:
+            print(
+                json.dumps(
+                    {
+                        "event": "step",
+                        "step": step + 1,
+                        "seconds": elapsed,
+                        "loss": float(loss.detach().cpu()),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
 
     assert loss is not None and values is not None
     measured_steps = max(args.steps - 1, 1)
     steady = step_seconds[1:] if len(step_seconds) > 1 else step_seconds
     mean_steady = sum(steady) / len(steady)
-    print(
-        json.dumps(
+    if primary:
+        print(
+            json.dumps(
             {
                 "event": "summary",
                 "batch_size": args.batch_size,
@@ -240,8 +323,10 @@ def main() -> None:
             },
             sort_keys=True,
         ),
-        flush=True,
-    )
+            flush=True,
+        )
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

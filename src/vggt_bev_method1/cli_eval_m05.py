@@ -24,13 +24,14 @@ from vggt_bev_method1.cli_train_metric import (
     _build_scale_target,
     scale_fit_config,
 )
-from vggt_bev_method1.data.vggt_unit_targets import (
-    regrid_merged_metric_targets_to_vggt_units,
-)
 from vggt_bev_method1.m04_losses import m04_scale_loss
 from vggt_bev_method1.m05_config import load_m05_config
 from vggt_bev_method1.m05_losses import m05_loss_weights
-from vggt_bev_method1.m05_train_utils import build_m05_datasets, m05_collate
+from vggt_bev_method1.m05_train_utils import (
+    build_m05_datasets,
+    fixed_metric_m05_target,
+    m05_collate,
+)
 from vggt_bev_method1.p1b_losses import p1b_bev_loss
 from vggt_bev_method1.train_utils import (
     distributed_runtime,
@@ -142,24 +143,16 @@ def main() -> None:
                     include_latest_auxiliary=False,
                     assemble_runtime_outputs=True,
                 )
-                targets = regrid_merged_metric_targets_to_vggt_units(
+                targets = fixed_metric_m05_target(
                     batch["merged_fov_complete_target"],
                     batch["merged_visible_target"],
                     batch["merged_fov_support_target"],
                     batch["merged_gt_valid_mask"],
-                    scale_target["lambda_gt"],
-                    scale_target["target_valid"],
-                    source_extent_m=float(
-                        config["data"]["merged_source_extent_m"]
-                    ),
-                    target_extent_vggt=float(
-                        config["model"]["merged_bev_extent_vggt"]
-                    ),
-                    target_size=int(config["model"]["merged_bev_output_size"]),
-                    latest_observed_free_metric=batch[
+                    extent_m=float(config["model"]["merged_bev_extent_m"]),
+                    latest_observed_free=batch[
                         "latest_observed_free_target"
                     ],
-                    latest_support_metric=batch["latest_fov_support_target"],
+                    latest_support=batch["latest_fov_support_target"],
                 )
                 bev_loss = p1b_bev_loss(
                     prediction["merged_bev"],
@@ -199,10 +192,9 @@ def main() -> None:
                     for key, value in scale_loss.items()
                 }
             )
-            for item, meta, coverage, valid_mask in zip(
+            for item, meta, valid_mask in zip(
                 sample_values,
                 metadata,
-                targets["source_coverage_fraction"],
                 targets["gt_valid_mask"],
                 strict=True,
             ):
@@ -213,7 +205,7 @@ def main() -> None:
                         "dataset": meta["dataset"],
                         "scene_key": meta["scene_key"],
                         "history_frame_count": int(meta["history_frame_count"]),
-                        "source_coverage_fraction": float(coverage.item()),
+                        "coordinate_coverage_fraction": 1.0,
                         "effective_supervision_fraction": float(
                             valid_mask.float().mean().item()
                         ),

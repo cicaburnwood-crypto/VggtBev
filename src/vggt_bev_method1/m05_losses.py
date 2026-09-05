@@ -24,16 +24,17 @@ def m05_bev_loss(
     hidden_occupied_zero_fraction: float = 0.10,
     hidden_occupied_ramp_fraction: float = 0.15,
     latest_auxiliary_weight: float = 0.50,
+    loss_combination: str = "convex",
 ) -> dict[str, torch.Tensor]:
     """Apply the proven Single objective to latest and Merged predictions.
 
-    Both objectives are normalized conditional map losses over the same native
-    grid. The default arithmetic mean keeps the BEV contribution invariant to
-    adding the training-only latest auxiliary branch. Exposing the convex mix
-    supports controlled capacity diagnostics without changing either branch's
-    objective or the runtime model.
+    The historical M05 default remains a convex mix. M05+ selects
+    ``merged_primary_additive`` so the Merged objective keeps unit gradient
+    weight while latest-frame supervision acts only as a weak auxiliary.
     """
 
+    if loss_combination not in {"convex", "merged_primary_additive"}:
+        raise ValueError(f"unsupported M05 loss combination: {loss_combination}")
     if not 0.0 <= latest_auxiliary_weight <= 1.0:
         raise ValueError("M05 latest auxiliary weight must be in [0,1]")
 
@@ -67,7 +68,9 @@ def m05_bev_loss(
     merged = branch(merged_prediction, merged_target)
     latest = branch(latest_prediction, latest_target)
     latest_weight = float(latest_auxiliary_weight)
-    merged_weight = 1.0 - latest_weight
+    merged_weight = (
+        1.0 if loss_combination == "merged_primary_additive" else 1.0 - latest_weight
+    )
     loss = merged_weight * merged["loss"] + latest_weight * latest["loss"]
     return {
         "loss": loss,
@@ -75,6 +78,9 @@ def m05_bev_loss(
         "latest_auxiliary_loss": latest["loss"],
         "merged_loss_weight": loss.new_tensor(merged_weight),
         "latest_auxiliary_loss_weight": loss.new_tensor(latest_weight),
+        "loss_combination_is_merged_primary_additive": loss.new_tensor(
+            float(loss_combination == "merged_primary_additive")
+        ),
         "wrong_evidence_schedule_scale": loss.new_tensor(wrong_scale),
         "hidden_occupied_schedule_scale": loss.new_tensor(hidden_scale),
         **{f"merged_{key}": value for key, value in merged.items() if key != "loss"},

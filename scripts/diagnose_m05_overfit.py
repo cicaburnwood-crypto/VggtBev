@@ -14,15 +14,16 @@ import torch
 from PIL import Image, ImageDraw
 
 from vggt_bev_method1.cli_eval_p1d import _sample_metrics, _summarize
-from vggt_bev_method1.cli_train_metric import _build_scale_target, scale_fit_config
 from vggt_bev_method1.cli_train_m05 import build_model
-from vggt_bev_method1.data.vggt_unit_targets import (
-    regrid_merged_metric_targets_to_vggt_units,
-)
+from vggt_bev_method1.cli_train_metric import _build_scale_target, scale_fit_config
 from vggt_bev_method1.m04_losses import m04_scale_loss
 from vggt_bev_method1.m05_config import load_m05_config
 from vggt_bev_method1.m05_losses import m05_bev_loss, m05_loss_weights
-from vggt_bev_method1.m05_train_utils import build_m05_datasets, m05_collate
+from vggt_bev_method1.m05_train_utils import (
+    build_m05_datasets,
+    fixed_metric_m05_target,
+    m05_collate,
+)
 from vggt_bev_method1.train_utils import move_batch, seed_everything
 
 
@@ -104,25 +105,20 @@ def _fixed_samples(
     return [dataset[index] for index in selected_indices]
 
 
-def _regrid(
+def _fixed_target(
     batch: dict,
-    scale_target: dict,
     config: dict,
     *,
     prefix: str,
 ) -> dict[str, torch.Tensor]:
-    return regrid_merged_metric_targets_to_vggt_units(
+    return fixed_metric_m05_target(
         batch[f"{prefix}_fov_complete_target"],
         batch[f"{prefix}_visible_target"],
         batch[f"{prefix}_fov_support_target"],
         batch[f"{prefix}_gt_valid_mask"],
-        scale_target["lambda_gt"],
-        scale_target["target_valid"],
-        source_extent_m=float(config["data"]["merged_source_extent_m"]),
-        target_extent_vggt=float(config["model"]["merged_bev_extent_vggt"]),
-        target_size=int(config["model"]["merged_bev_output_size"]),
-        latest_observed_free_metric=batch["latest_observed_free_target"],
-        latest_support_metric=batch["latest_fov_support_target"],
+        extent_m=float(config["model"]["merged_bev_extent_m"]),
+        latest_observed_free=batch["latest_observed_free_target"],
+        latest_support=batch["latest_fov_support_target"],
     )
 
 
@@ -156,8 +152,8 @@ def _cache_batch(model, samples: list[dict], config: dict, device: torch.device)
     return {
         "extraction": extraction,
         "scale_target": scale_target,
-        "merged_target": _regrid(batch, scale_target, config, prefix="merged"),
-        "latest_target": _regrid(batch, scale_target, config, prefix="latest"),
+        "merged_target": _fixed_target(batch, config, prefix="merged"),
+        "latest_target": _fixed_target(batch, config, prefix="latest"),
         "rgb": rgb,
         "metadata": metadata,
     }
@@ -352,11 +348,11 @@ def _evaluate(
         "history_gate_mean": float(
             prediction["history_update_gate_mean"].float().mean().cpu()
         ),
-        "source_coverage_fraction": float(
-            cached["merged_target"]["source_coverage_fraction"].mean().cpu()
+        "coordinate_coverage_fraction": float(
+            cached["merged_target"]["coordinate_coverage_fraction"].mean().cpu()
         ),
-        "effective_metric_extent_gt_m": float(
-            cached["merged_target"]["effective_metric_extent_gt"].mean().cpu()
+        "metric_extent_m": float(
+            cached["merged_target"]["metric_extent_m"].mean().cpu()
         ),
         "outside_gt_support_probability_mean": float(
             outside_support_mean.cpu()

@@ -99,7 +99,7 @@ class StructuredFrameReliabilityHead(nn.Module):
 
 
 class DenseNativeQuery(nn.Module):
-    """One learned content vector per native BEV cell plus metric-free position.
+    """One learned content vector per native fixed-metric BEV cell.
 
     M04's row/column factorization was economical, but it also coupled distant
     edge cells through the same factors. M05 restores the full native query
@@ -110,7 +110,7 @@ class DenseNativeQuery(nn.Module):
         self,
         *,
         size: int,
-        extent_vggt: float,
+        extent_m: float,
         hidden_dim: int,
         fourier_bands: int = 4,
     ) -> None:
@@ -118,8 +118,8 @@ class DenseNativeQuery(nn.Module):
         if fourier_bands <= 0:
             raise ValueError("M05 Fourier band count must be positive")
         self.size = int(size)
-        self.extent_vggt = float(extent_vggt)
-        normalized, reference = _native_query_coordinates(size, extent_vggt)
+        self.extent_m = float(extent_m)
+        normalized, reference = _native_query_coordinates(size, extent_m)
         self.register_buffer("normalized_coordinates", normalized, persistent=True)
         self.register_buffer("reference_grid", reference, persistent=True)
         self.register_buffer(
@@ -247,7 +247,9 @@ class ReverseHistoryUpdate(nn.Module):
 class M05Head(nn.Module):
     """Latest-anchored reverse-history Merged BEV and metric-scale head."""
 
-    pipeline_id = "M05-LATEST-ANCHORED-REVERSE-GATED-MERGED-SCALE-NLL"
+    pipeline_id = (
+        "M05-LATEST-ANCHORED-REVERSE-GATED-METRIC-MERGED-SCALE-NLL"
+    )
 
     def __init__(
         self,
@@ -268,7 +270,7 @@ class M05Head(nn.Module):
         # change parameters, predictions, losses, or checkpoint compatibility.
         cross_query_chunk_size: int = 65536,
         merged_bev_size: int = 512,
-        merged_extent_vggt: float = 6.5,
+        merged_extent_m: float = 10.0,
         query_fourier_bands: int = 4,
         refinement_layers: int = 1,
         predict_scale_uncertainty: bool = True,
@@ -326,7 +328,7 @@ class M05Head(nn.Module):
         )
         self.query = DenseNativeQuery(
             size=merged_bev_size,
-            extent_vggt=merged_extent_vggt,
+            extent_m=merged_extent_m,
             hidden_dim=hidden_dim,
             fourier_bands=query_fourier_bands,
         )
@@ -370,8 +372,8 @@ class M05Head(nn.Module):
         return self.query.size
 
     @property
-    def merged_extent_vggt(self) -> float:
-        return self.query.extent_vggt
+    def merged_extent_m(self) -> float:
+        return self.query.extent_m
 
     @staticmethod
     def _add_frame_embedding(
@@ -464,7 +466,7 @@ class M05Head(nn.Module):
         extraction: dict,
         *,
         include_merged: bool = True,
-        include_scale: bool = True,
+        include_scale: bool = False,
         include_latest_auxiliary: bool = False,
         assemble_runtime_outputs: bool = True,
     ) -> dict:
@@ -587,22 +589,36 @@ class M05System(nn.Module):
             "external_fusion_present": False,
             "runtime_postprocessing_present": False,
             "merged_source": "latest anchor plus reverse gated historical updates",
-            "coordinate_mode": "vggt_native_units",
-            "merged_extent_vggt": head.merged_extent_vggt,
+            "coordinate_mode": "fixed_metric",
+            "merged_extent_m": head.merged_extent_m,
+            "merged_bounds_m": (
+                -head.merged_extent_m / 2.0,
+                head.merged_extent_m / 2.0,
+                -head.merged_extent_m / 2.0,
+                head.merged_extent_m / 2.0,
+            ),
+            "merged_cell_size_m": head.merged_extent_m / head.merged_bev_size,
             "merged_output_size": head.merged_bev_size,
             "scale_unit": "meter_per_vggt_runtime_unit",
             "scale_is_merged_input": False,
+            "scale_default_runtime_output": False,
+            "scale_output_present": "scale" in prediction,
             "geometry_conditioning": "latest_anchor_reverse_gated_history",
             "maximum_history": head.maximum_history,
             "orientation": "latest ego centered; forward is image-up",
         }
 
-    def forward(self, images: torch.Tensor) -> dict:
+    def forward(
+        self,
+        images: torch.Tensor,
+        *,
+        include_scale: bool = False,
+    ) -> dict:
         extraction = self.extract(images)
         for private_key in ("_aggregated", "_patch_start", "_images"):
             extraction.pop(private_key, None)
         if images.device.type != "cuda":
-            return self.forward_head(extraction)
+            return self.forward_head(extraction, include_scale=include_scale)
         runtime_dtype = (
             torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         )
@@ -614,4 +630,4 @@ class M05System(nn.Module):
             "camera_register_tokens"
         ].to(dtype=runtime_dtype)
         with torch.autocast("cuda", dtype=runtime_dtype):
-            return self.forward_head(extraction)
+            return self.forward_head(extraction, include_scale=include_scale)

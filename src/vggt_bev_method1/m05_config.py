@@ -9,8 +9,8 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 
-PIPELINE_ID = "M05-LATEST-ANCHORED-REVERSE-GATED-MERGED-SCALE-NLL"
-CHECKPOINT_SCHEMA = "m05-role-preserving-reverse-gated-merged-scale-512-v2"
+PIPELINE_ID = "M05-LATEST-ANCHORED-REVERSE-GATED-METRIC-MERGED-SCALE-NLL"
+CHECKPOINT_SCHEMA = "m05-fixed-metric-role-preserving-merged-scale-512-v3"
 
 
 def load_m05_config(path: str | Path) -> dict[str, Any]:
@@ -33,8 +33,8 @@ def validate_m05_config(config: dict[str, Any]) -> None:
         raise ValueError(f"model.pipeline_variant must be {PIPELINE_ID}")
     if str(training.get("pipeline")) != PIPELINE_ID:
         raise ValueError(f"training.pipeline must be {PIPELINE_ID}")
-    if str(data.get("coordinate_mode")) != "metric_source_to_vggt_units":
-        raise ValueError("M05 target coordinate contract is invalid")
+    if str(data.get("coordinate_mode")) != "fixed_metric":
+        raise ValueError("M05 requires direct fixed-metric supervision")
     if str(data.get("supervision")) != "metric_fov_complete_evidential":
         raise ValueError("M05 requires metric FOV-complete evidential GT")
     if float(data.get("merged_source_extent_m", 0.0)) != 10.0:
@@ -64,8 +64,15 @@ def validate_m05_config(config: dict[str, Any]) -> None:
         raise ValueError("M05 model/data maximum_history must match")
     if int(model.get("merged_bev_output_size", 0)) != 512:
         raise ValueError("canonical M05 output must remain 512x512")
-    if float(model.get("merged_bev_extent_vggt", 0.0)) != 6.5:
-        raise ValueError("canonical M05 extent must remain 6.5 VGGT units")
+    if float(model.get("merged_bev_extent_m", 0.0)) != 10.0:
+        raise ValueError("canonical M05 output must remain a fixed 10 m grid")
+    if "merged_bev_extent_vggt" in model:
+        raise ValueError("fixed-metric M05 forbids a VGGT-unit BEV extent")
+    if "minimum_mean_source_coverage" in training:
+        raise ValueError(
+            "fixed-metric M05 has full coordinate coverage and forbids the old "
+            "scale-dependent source-coverage threshold"
+        )
     if not bool(model.get("native_query_resolution", False)):
         raise ValueError("M05 requires native-resolution queries")
     if not bool(model.get("full_per_pixel_query", False)):

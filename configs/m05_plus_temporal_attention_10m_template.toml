@@ -23,48 +23,57 @@ split_seed = 170815
 split_manifest = "manifests/wtbd_first260k_completion.json"
 
 [model]
-pipeline_variant = "M05-LATEST-ANCHORED-REVERSE-GATED-METRIC-MERGED-SCALE-NLL"
+pipeline_variant = "M05PLUS-PER-QUERY-TEMPORAL-ATTENTION-LARGE-METRIC-NLL"
 probability_model = "evidential"
-geometry_conditioning = "latest_anchor_reverse_gated_history"
+geometry_conditioning = "none"
+patch_fusion = "dpt_lite_top_down"
+patch_token_streams = "local_global_separate_until_fpn_output"
+prefix_conditioning = "per_cell_role_separated_token_attention"
+prefix_context_training = "joint_bev_only"
+explicit_geometry_module = false
+geometry_auxiliary_loss = false
+temporal_attention_mode = "per_query_frame_softmax"
+temporal_null_enabled = true
+temporal_null_initial_probability = 0.90
+dataset_input_order = "oldest_to_latest"
+vggt_input_order = "latest_to_oldest"
+bev_reference_frame = "latest"
 vggt_source = "vendor/backbone"
 checkpoint = "checkpoints/model.pt"
 patch_size = 16
 cached_layers = [4, 11, 17, 23]
 spatial_scales = [4.0, 2.0, 1.0, 0.5]
 vggt_token_dim = 2048
-hidden_dim = 64
+hidden_dim = 96
+patch_stream_dim = 48
+query_content_dim = 64
 attention_heads = 8
-latest_decoder_layers = 2
-# One shared update cell is applied once to each history frame. Raising this
-# value adds depth per frame rather than changing the temporal order.
-history_update_layers = 1
+latest_decoder_layers = 3
+temporal_proposal_layers = 2
+scale_hidden_dim = 64
 scale_decoder_layers = 2
 self_attention_mode = "linear"
 deformable_samples = 4
-# Execution-only chunking. A real-data pro6000 sweep found 65536 to be 2.44x
-# faster than 8192 for a ten-frame batch=1 train step with similar peak memory.
 cross_query_chunk_size = 65536
 merged_bev_output_size = 512
 merged_bev_extent_m = 10.0
 native_query_resolution = true
 full_per_pixel_query = true
 reverse_history_weight_sharing = true
-structured_prefix_readout = true
 structured_frame_reliability = true
 query_fourier_bands = 4
-refinement_layers = 1
+shared_refinement_layers = 2
+routing_refinement_layers = 1
+evidence_refinement_layers = 1
 predict_scale_uncertainty = true
-implicit_geometry_hidden_dim = 256
-implicit_geometry_heads = 8
-implicit_geometry_layers = 4
+prefix_context_hidden_dim = 1024
+prefix_context_heads = 16
+prefix_context_layers = 8
 maximum_history = 10
 maximum_prefix_tokens = 17
 frame_reliability_hidden_dim = 256
 frame_reliability_minimum = 0.25
 frame_reliability_maximum = 1.75
-# Conservative GRU-style initialization. It is trainable and does not impose
-# a hard visibility or GT-derived update rule.
-history_gate_initial_bias = -1.0
 
 [scale_fit]
 confidence_threshold = 0.2
@@ -82,14 +91,15 @@ irls_iterations = 4
 
 [teacher_cache]
 mode = "live"
-root = "cache/m05_teacher"
+root = "cache/m05_plus_teacher"
 
 [training]
-pipeline = "M05-LATEST-ANCHORED-REVERSE-GATED-METRIC-MERGED-SCALE-NLL"
+pipeline = "M05PLUS-PER-QUERY-TEMPORAL-ATTENTION-LARGE-METRIC-NLL"
 stage = "joint"
 initialization = "fresh"
 bev_objective = "single_baseline_dual_supervision"
-latest_auxiliary_loss_weight = 0.50
+latest_auxiliary_loss_mode = "merged_primary_additive"
+latest_auxiliary_multiplier = 0.10
 device = "cuda"
 required_cuda_devices = 1
 distributed_backend = "nccl"
@@ -99,10 +109,6 @@ nccl_timeout_seconds = 300
 ddp_static_graph = false
 ddp_find_unused_parameters = true
 epochs = 15
-# Portable default. The dedicated 96 GiB pro6000 profile uses batch_size=10;
-# a direct all-ten-frame optimizer probe measured 86.18 GiB allocated and
-# 91.22 GiB reserved on a 95.6-GiB device. Lower-memory targets must retain a
-# separately validated smaller per-rank batch.
 batch_size = 1
 num_workers = 8
 persistent_workers = true
@@ -113,9 +119,8 @@ weight_decay = 0.02
 warmup_fraction = 0.03
 gradient_clip_norm = 1.0
 
-# Exact proven Single-Baseline loss family, applied to latest and Merged and
-# averaged. Boundary emphasis remains zero because the best Single run obtained
-# its edge quality from surface grouping and support Dice, not a custom contour.
+# Per-branch objectives remain identical to M05/Single-Baseline; only the
+# Merged-primary branch combination above is M05+-specific.
 observed_gate_pixel_weight = 1.0
 observed_gate_region_weight = 0.0
 observed_gate_boundary_emphasis = 0.0
@@ -143,4 +148,4 @@ seed = 170905
 log_every_steps = 20
 checkpoint_every_steps = 5000
 validation_batches = 500
-output_dir = "runs/m05_reverse_gated_first260k_15e_fresh_v1"
+output_dir = "runs/m05_plus_dpt_role_token_temporal_15e_fresh_v3"

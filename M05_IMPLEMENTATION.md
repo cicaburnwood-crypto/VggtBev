@@ -1,9 +1,10 @@
 # M05: Latest-Anchored Reverse-Gated Merged BEV + Scale
 
-M05 is a fresh successor to M04. It preserves the external task contract:
-one ordered RGB window enters one frozen VGGT pass, and runtime returns one
-512 x 512 Merged BEV in 6.5 VGGT units plus metres-per-VGGT Scale and
-uncertainty. There is no pose, camera-height, GT, planner, or navigation input.
+M05 is a fresh successor to M04. One ordered RGB window enters one frozen VGGT
+pass, and default runtime returns one native 512 x 512 Merged BEV over the
+fixed metric square `x,z in [-5,5] m`. An explicit `include_scale=True` request
+also returns the independent metres-per-VGGT Scale and uncertainty. There is no
+pose, camera-height, GT, planner, or navigation input.
 
 ## Why M05 exists
 
@@ -44,8 +45,15 @@ metric metres. Decoded JPEG labels are snapped back to the exact simulator
 palette before target construction. The current-frame auxiliary
 target is derived on the fly from the same complete truth and the already
 stored current masked BEV. No data recollection, upsampling, or relabelling is
-required. GT Scale is used only to inverse-sample training labels into VGGT
-units; cells outside the 10 m source remain hard ignored.
+required. These labels supervise the prediction directly, pixel for pixel.
+Only the independent Void/GT-valid mask can remove a pixel from BEV losses.
+Scale-label validity affects only the Scale loss and never BEV supervision.
+
+The Scale Token remains a parallel, optionally trained output in metre per VGGT
+runtime unit. It can metricize frozen-VGGT geometry, but it does not condition
+the BEV branch: the BEV is already metric by construction. BEV and Scale use
+separate optimizers, schedulers and gradient clipping. Runtime does not execute
+Scale unless explicitly requested.
 
 ## Tested execution settings
 

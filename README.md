@@ -4,9 +4,15 @@ M05 is the active RGB-window to Merged-BEV-and-Scale pipeline. It restores a
 full native 512 x 512 query table, anchors the map with the latest frame, and
 then applies one shared gated deformable update to history frames from newest
 to oldest. A training-only latest-frame auxiliary prediction uses the proven
-Single-Baseline map objective; runtime still returns only Merged BEV and Scale.
+Single-Baseline map objective; default runtime returns only Merged BEV.
 Camera and register prefix tokens retain separate readout paths; register
 summaries use learned type-aware pooling instead of averaging all 17 tokens.
+
+The Merged raster has a fixed metric contract: 512 x 512 over 10 x 10 m,
+`x,z in [-5,5] m`. Existing 10 m GT supervises it directly without any
+Scale-dependent regrid. The parallel Scale Token does not condition BEV.
+Scale training is isolated and runtime computes it only with an explicit
+`include_scale=True` request.
 
 It reuses the existing 512 x 512, 10 x 10 m Merged supervision and requires no
 new data collection. See `M05_IMPLEMENTATION.md` for the complete architecture,
@@ -112,3 +118,13 @@ python -m vggt_bev_method1.cli_audit_wtbd_scale \
   --config configs/wtbd_merge_scale_template.toml \
   --max-samples 2000
 ```
+# M05+
+
+M05+ is an independent, larger M05 variant with per-BEV-cell temporal frame
+attention, a history-count-invariant learned Null route, local/global DPT-lite
+patch fusion, and unpooled Camera/Register content attention. Its prefix path
+is jointly trained through BEV only: there is no explicit geometry module,
+FiLM-style modulation, geometry auxiliary loss, or separately trained geometry
+head. It reverses chronological RGB only at the frozen-VGGT boundary and
+requires a fresh v3 checkpoint. See
+[M05_PLUS_IMPLEMENTATION.md](M05_PLUS_IMPLEMENTATION.md).

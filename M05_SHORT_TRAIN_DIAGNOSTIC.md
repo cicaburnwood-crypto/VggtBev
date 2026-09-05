@@ -2,6 +2,12 @@
 
 Date: 2026-09-01 (Asia/Hong_Kong)
 
+> Historical M05-v2 diagnostic. Its 6.5-VGGT-unit target regrid was retired by
+> the fixed-metric M05-v3 contract. The reported 0.133--0.179 source coverage
+> is evidence of that retired coordinate mismatch, not a property of M05-v3.
+> Its optimizer/VRAM measurements remain historical only; v3 must be measured
+> afresh before selecting a production batch size.
+
 ## Decision
 
 Keep the current M05 structure, `history_gate_initial_bias = -1.0`, and the
@@ -93,7 +99,7 @@ largest verified safe physical batch and reduces gradient variance to about
 80% of batch 8 (gradient standard deviation about 89.4%, under IID scaling).
 The learning rate remains `1e-4`; no unvalidated linear LR scaling is applied.
 
-## Main remaining risk
+## Retired v2 coordinate defect
 
 The stratified training samples have mean metric-source coverage 0.1788 and an
 effective output extent of 29.34 m; holdout coverage is only 0.1330 with an
@@ -103,11 +109,9 @@ ignored. Visuals confirm a small supervised GT island inside a much larger
 prediction grid. This is more consequential than the 0.40-vs-0.50 loss-weight
 change.
 
-The next useful experiment is a larger scene-disjoint short run that bins
-samples by source-coverage fraction and scale. If low-coverage samples remain
-dominant, supervision needs a wider metric source or a principled query-valid
-domain policy; adding hand-tuned edge penalties cannot recover labels that do
-not exist.
+M05-v3 removes this regrid. Its 10 m output is supervised directly by the
+native 10 m source, so geometric coordinate coverage is one and only the
+independent Void/GT-valid mask removes pixels from BEV losses.
 
 ## Reproduction tools
 
