@@ -588,6 +588,12 @@ def _sampler(dataset, config: dict, *, distributed: bool, rank: int, world_size:
             num_replicas=world_size if distributed else 1,
             rank=rank if distributed else 0,
             batch_size=int(config["training"]["batch_size"]),
+            history_cap_by_epoch=tuple(
+                int(value)
+                for value in config["training"].get(
+                    "history_cap_by_epoch", ()
+                )
+            ),
         )
     if distributed:
         return DistributedEpochShuffleSampler(
@@ -779,7 +785,9 @@ def _flatten_task_gradients(
                 if gradient is not None
                 else torch.zeros_like(parameter).reshape(-1)
             )
-            for parameter, gradient in zip(parameters, gradients, strict=True)
+            for parameter, gradient in zip(  # noqa: B905 - Python 3.9
+                parameters, gradients
+            )
         ]
     )
 
@@ -882,7 +890,11 @@ def _apply_gradient_correction(
     parameters: list[torch.nn.Parameter],
     correction: list[torch.Tensor],
 ) -> None:
-    for parameter, value in zip(parameters, correction, strict=True):
+    if len(parameters) != len(correction):
+        raise RuntimeError("PCGrad correction length does not match parameters")
+    for parameter, value in zip(  # noqa: B905 - Python 3.9
+        parameters, correction
+    ):
         if parameter.grad is None:
             parameter.grad = value.clone()
         else:

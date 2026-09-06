@@ -129,6 +129,7 @@ class SessionPrefixSampler(Sampler[int]):
         rank: int = 0,
         batch_size: int = 1,
         shuffle: bool = True,
+        history_cap_by_epoch: tuple[int, ...] | None = None,
     ) -> None:
         if num_replicas <= 0 or not 0 <= rank < num_replicas:
             raise ValueError("invalid session-prefix sampler rank/world size")
@@ -159,6 +160,9 @@ class SessionPrefixSampler(Sampler[int]):
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.epoch = 0
+        self.history_cap_by_epoch = tuple(history_cap_by_epoch or ())
+        if any(cap <= 0 for cap in self.history_cap_by_epoch):
+            raise ValueError("history curriculum caps must be positive")
         self._samples = samples
         self._session_candidates = tuple(
             tuple(
@@ -208,6 +212,19 @@ class SessionPrefixSampler(Sampler[int]):
     def __iter__(self) -> Iterator[int]:
         selected: list[int] = []
         for session_index, candidates in enumerate(self._session_candidates):
+            if self.history_cap_by_epoch:
+                cap = self.history_cap_by_epoch[
+                    min(self.epoch, len(self.history_cap_by_epoch) - 1)
+                ]
+                candidates = tuple(
+                    index
+                    for index in candidates
+                    if self._samples[index].target_frame + 1 <= cap
+                )
+                if not candidates:
+                    raise RuntimeError(
+                        "history curriculum removed every prefix from a session"
+                    )
             # Give sessions different phase offsets, then visit every available
             # prefix once before repeating one in a later epoch.
             offset = self._session_offsets[session_index]

@@ -12,9 +12,9 @@ from vggt_bev_method1.p1b_losses import (
 
 def m05_bev_loss(
     merged_prediction: dict,
-    latest_prediction: dict,
+    latest_prediction: dict | None,
     merged_target: dict[str, torch.Tensor],
-    latest_target: dict[str, torch.Tensor],
+    latest_target: dict[str, torch.Tensor] | None,
     *,
     weights: P1BLossWeights,
     global_step: int,
@@ -66,8 +66,21 @@ def m05_bev_loss(
         )
 
     merged = branch(merged_prediction, merged_target)
-    latest = branch(latest_prediction, latest_target)
     latest_weight = float(latest_auxiliary_weight)
+    if (latest_prediction is None) != (latest_target is None):
+        raise ValueError(
+            "M05 latest prediction and target must either both be present or absent"
+        )
+    latest_active = latest_prediction is not None
+    if not latest_active and latest_weight != 0.0:
+        raise ValueError(
+            "M05 latest auxiliary weight must be zero when the branch is skipped"
+        )
+    latest = (
+        branch(latest_prediction, latest_target)
+        if latest_active
+        else {"loss": merged["loss"].new_zeros(())}
+    )
     merged_weight = (
         1.0 if loss_combination == "merged_primary_additive" else 1.0 - latest_weight
     )
@@ -78,6 +91,7 @@ def m05_bev_loss(
         "latest_auxiliary_loss": latest["loss"],
         "merged_loss_weight": loss.new_tensor(merged_weight),
         "latest_auxiliary_loss_weight": loss.new_tensor(latest_weight),
+        "latest_auxiliary_active": loss.new_tensor(float(latest_active)),
         "loss_combination_is_merged_primary_additive": loss.new_tensor(
             float(loss_combination == "merged_primary_additive")
         ),

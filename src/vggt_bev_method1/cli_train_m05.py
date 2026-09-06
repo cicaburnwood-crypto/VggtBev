@@ -124,6 +124,69 @@ def _target(
     )
 
 
+def _latest_auxiliary_execution(
+    training: dict,
+    *,
+    global_step: int,
+    total_steps: int,
+    force: bool = False,
+) -> tuple[bool, float]:
+    """Choose the training-only latest branch without changing its expectation."""
+
+    multiplier = float(
+        training.get(
+            "latest_auxiliary_multiplier",
+            training.get("latest_auxiliary_loss_weight", 0.50),
+        )
+    )
+    interval = int(training.get("latest_auxiliary_interval", 1))
+    full_fraction = float(training.get("latest_auxiliary_full_fraction", 1.0))
+    if interval <= 0:
+        raise ValueError("latest auxiliary interval must be positive")
+    if not 0.0 <= full_fraction <= 1.0:
+        raise ValueError("latest auxiliary full fraction must be in [0,1]")
+    full_steps = min(total_steps, int(total_steps * full_fraction + 0.999999))
+    full_phase = global_step < full_steps
+    periodic = (global_step - full_steps) % interval == 0
+    active = force or full_phase or interval == 1 or periodic
+    effective_multiplier = multiplier
+    if active and not force and not full_phase and interval > 1:
+        effective_multiplier *= interval
+    return active, effective_multiplier if active else 0.0
+
+
+def _configure_m05_execution(model: M05System, training: dict) -> dict[str, object]:
+    """Apply execution controls that preserve the model and loss semantics."""
+
+    fraction = float(training.get("attention_checkpoint_fraction", 1.0))
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("attention checkpoint fraction must be in [0,1]")
+    attention_modules = 0
+    for module in model.unwrapped_head().modules():
+        if hasattr(module, "memory_efficient_checkpoint_fraction"):
+            module.memory_efficient_checkpoint_fraction = fraction
+            module.memory_efficient_training = fraction > 0.0
+            attention_modules += 1
+    channels_last = bool(training.get("channels_last", False))
+    if channels_last:
+        model.unwrapped_head().to(memory_format=torch.channels_last)
+        if hasattr(model.unwrapped_head(), "channels_last_spatial"):
+            model.unwrapped_head().channels_last_spatial = True
+    cudnn_benchmark = bool(training.get("cudnn_benchmark", False))
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.benchmark = cudnn_benchmark
+    torch.set_float32_matmul_precision(
+        str(training.get("float32_matmul_precision", "highest"))
+    )
+    return {
+        "attention_checkpoint_fraction": fraction,
+        "attention_modules": attention_modules,
+        "channels_last": channels_last,
+        "cudnn_benchmark": cudnn_benchmark,
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+    }
+
+
 def _forward_losses(
     model: M05System,
     batch: dict,
@@ -131,6 +194,7 @@ def _forward_losses(
     *,
     global_step: int,
     total_steps: int,
+    force_latest_auxiliary: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     training = config["training"]
     extraction = model.extract(batch["images"])
@@ -149,18 +213,26 @@ def _forward_losses(
         extraction["camera_register_tokens"] = extraction[
             "camera_register_tokens"
         ].to(dtype=torch.bfloat16)
+    latest_active, latest_multiplier = _latest_auxiliary_execution(
+        training,
+        global_step=global_step,
+        total_steps=total_steps,
+        force=force_latest_auxiliary,
+    )
     prediction = model.forward_head(
         extraction,
         include_merged=True,
         include_scale=True,
-        include_latest_auxiliary=True,
+        include_latest_auxiliary=latest_active,
         assemble_runtime_outputs=False,
     )
     merged_target = _target(batch, config, prefix="merged")
-    latest_target = _target(batch, config, prefix="latest")
+    latest_target = (
+        _target(batch, config, prefix="latest") if latest_active else None
+    )
     bev = m05_bev_loss(
         prediction["merged_bev"],
-        prediction["latest_auxiliary_bev"],
+        prediction.get("latest_auxiliary_bev"),
         merged_target,
         latest_target,
         weights=m05_loss_weights(training),
@@ -178,12 +250,7 @@ def _forward_losses(
         hidden_occupied_ramp_fraction=float(
             training["hidden_occupied_ramp_fraction"]
         ),
-        latest_auxiliary_weight=float(
-            training.get(
-                "latest_auxiliary_multiplier",
-                training.get("latest_auxiliary_loss_weight", 0.50),
-            )
-        ),
+        latest_auxiliary_weight=latest_multiplier,
         loss_combination=str(
             training.get("latest_auxiliary_loss_mode", "convex")
         ),
@@ -207,9 +274,11 @@ def _forward_losses(
         "target_effective_supervision_fraction": merged_target[
             "gt_valid_mask"
         ].float().mean(),
-        "latest_effective_supervision_fraction": latest_target[
-            "gt_valid_mask"
-        ].float().mean(),
+        "latest_effective_supervision_fraction": (
+            latest_target["gt_valid_mask"].float().mean()
+            if latest_target is not None
+            else merged_target["gt_valid_mask"].new_zeros((), dtype=torch.float32)
+        ),
         "target_metric_extent_m": merged_target["metric_extent_m"].mean(),
         "history_update_gate_mean": gate_mean,
         "frame_reliability_mean": prediction["frame_reliability"].float().mean(),
@@ -369,6 +438,7 @@ def _validate(
                 config,
                 global_step=global_step,
                 total_steps=total_steps,
+                force_latest_auxiliary=True,
             )
         for key, value in values.items():
             totals[key] = totals.get(key, 0.0) + float(value.detach().cpu())
@@ -427,6 +497,7 @@ def run_training(
     model = model_builder(config, device)
     for parameter in model.unwrapped_head().parameters():
         parameter.requires_grad_(True)
+    execution = _configure_m05_execution(model, training)
     compilation = _configure_head_compilation(model, training)
     if distributed:
         model.head = DistributedDataParallel(
@@ -556,6 +627,16 @@ def run_training(
                     "separate_bev_scale_optimizers": True,
                     "scale_default_runtime_output": False,
                     "head_compilation": compilation,
+                    "execution": execution,
+                    "history_cap_by_epoch": training.get(
+                        "history_cap_by_epoch", []
+                    ),
+                    "latest_auxiliary_interval": int(
+                        training.get("latest_auxiliary_interval", 1)
+                    ),
+                    "latest_auxiliary_full_fraction": float(
+                        training.get("latest_auxiliary_full_fraction", 1.0)
+                    ),
                 }
             ),
             flush=True,

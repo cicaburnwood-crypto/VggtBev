@@ -71,8 +71,8 @@ class DPTLiteLocalGlobalPyramid(nn.Module):
             raise ValueError("DPT-lite cached layers must run shallow to deep")
         if any(
             shallow_scale < deep_scale
-            for shallow_scale, deep_scale in zip(
-                spatial_scales[:-1], spatial_scales[1:], strict=True
+            for shallow_scale, deep_scale in zip(  # noqa: B905 - Python 3.9
+                spatial_scales[:-1], spatial_scales[1:]
             )
         ):
             raise ValueError(
@@ -510,13 +510,12 @@ class TemporalFrameProposal(nn.Module):
         frame_context: torch.Tensor,
     ) -> torch.Tensor:
         proposal = anchor
-        for state_norm, context_norm, attention, condition, projection in zip(
+        for state_norm, context_norm, attention, condition, projection in zip(  # noqa: B905 - Python 3.9
             self.state_norms,
             self.context_norms,
             self.attentions,
             self.frame_conditions,
             self.delta_projections,
-            strict=True,
         ):
             context = [
                 context_norm(level.movedim(2, -1)).movedim(-1, 2)
@@ -581,43 +580,75 @@ class PerQueryTemporalAttention(nn.Module):
     def forward(
         self,
         anchor: torch.Tensor,
-        proposals: list[torch.Tensor],
-        frame_contexts: list[torch.Tensor],
-        frame_reliabilities: list[torch.Tensor],
-        frame_ages: list[int],
+        proposals: list[torch.Tensor] | torch.Tensor,
+        frame_contexts: list[torch.Tensor] | torch.Tensor,
+        frame_reliabilities: list[torch.Tensor] | torch.Tensor,
+        frame_ages: list[int] | tuple[int, ...] | torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if not proposals:
+        if isinstance(proposals, list):
+            if not proposals:
+                empty = anchor.new_zeros((anchor.shape[0], 0))
+                return anchor, empty, anchor.new_ones((anchor.shape[0],))
+            proposal_tensor = torch.stack(proposals, dim=1)
+            if not isinstance(frame_contexts, list) or not isinstance(
+                frame_reliabilities, list
+            ):
+                raise ValueError("list proposals require list temporal metadata")
+            context_tensor = torch.stack(frame_contexts, dim=1)
+            reliability_tensor = torch.stack(frame_reliabilities, dim=1)
+        else:
+            proposal_tensor = proposals
+            if not isinstance(frame_contexts, torch.Tensor) or not isinstance(
+                frame_reliabilities, torch.Tensor
+            ):
+                raise ValueError("batched proposals require tensor temporal metadata")
+            context_tensor = frame_contexts
+            reliability_tensor = frame_reliabilities
+        if proposal_tensor.ndim != 4 or proposal_tensor.shape[0] != anchor.shape[0]:
+            raise ValueError("temporal proposals must have shape [B,H,Q,C]")
+        if proposal_tensor.shape[2:] != anchor.shape[1:]:
+            raise ValueError("temporal proposals must align with anchor queries")
+        history_count = proposal_tensor.shape[1]
+        if history_count == 0:
             empty = anchor.new_zeros((anchor.shape[0], 0))
             return anchor, empty, anchor.new_ones((anchor.shape[0],))
-        scores = []
-        state_feature = self.state_projection(anchor)
-        for proposal, context, reliability, age in zip(
-            proposals,
-            frame_contexts,
-            frame_reliabilities,
+        if reliability_tensor.shape != (anchor.shape[0], history_count):
+            raise ValueError("temporal reliability must have shape [B,H]")
+        projected_context = self.frame_projection(context_tensor)
+        if projected_context.ndim == 3:
+            projected_context = projected_context[:, :, None, :]
+        expected_context = (
+            anchor.shape[0],
+            history_count,
+            anchor.shape[1],
+            anchor.shape[2],
+        )
+        if projected_context.shape not in {
+            expected_context,
+            (anchor.shape[0], history_count, 1, anchor.shape[2]),
+        }:
+            raise ValueError("temporal frame context must be per-frame or per-query")
+        ages = torch.as_tensor(
             frame_ages,
-            strict=True,
-        ):
-            projected_context = self.frame_projection(context)
-            if projected_context.ndim == 2:
-                projected_context = projected_context[:, None, :].expand_as(
-                    state_feature
-                )
-            if projected_context.shape != state_feature.shape:
-                raise ValueError(
-                    "temporal frame context must be per-frame or per-query"
-                )
-            feature = torch.tanh(
-                state_feature
-                + self.delta_projection(proposal)
-                + projected_context
-            )
-            value = self.score(feature).squeeze(-1)
-            value = value + reliability.float().clamp_min(1e-4).log()[:, None]
-            value = value + self.frame_age_bias[age - 1]
-            scores.append(value)
-        history_scores = torch.stack(scores, dim=1).float()
-        history_count = history_scores.shape[1]
+            device=self.frame_age_bias.device,
+            dtype=torch.long,
+        )
+        if ages.shape != (history_count,):
+            raise ValueError("temporal frame ages must have shape [H]")
+        if bool(((ages < 1) | (ages > self.frame_age_bias.numel())).any()):
+            raise ValueError("temporal frame ages exceed the configured history")
+        feature = torch.tanh(
+            self.state_projection(anchor)[:, None]
+            + self.delta_projection(proposal_tensor)
+            + projected_context
+        )
+        history_scores = self.score(feature).squeeze(-1).float()
+        history_scores = history_scores + reliability_tensor.float().clamp_min(
+            1e-4
+        ).log()[:, :, None]
+        history_scores = history_scores + self.frame_age_bias[
+            ages - 1
+        ][None, :, None]
         null_score = self.null_score(anchor).squeeze(-1).unsqueeze(1).float()
         null_score = (
             null_score
@@ -628,8 +659,7 @@ class PerQueryTemporalAttention(nn.Module):
             torch.cat((null_score, history_scores), dim=1), dim=1
         ).to(dtype=anchor.dtype)
         history_weights = weights[:, 1:]
-        stacked = torch.stack(proposals, dim=1)
-        update = (history_weights.unsqueeze(-1) * stacked).sum(dim=1)
+        update = (history_weights.unsqueeze(-1) * proposal_tensor).sum(dim=1)
         merged = anchor + update
         return (
             merged,
@@ -676,11 +706,16 @@ class M05PlusHead(nn.Module):
         frame_reliability_minimum: float,
         frame_reliability_maximum: float,
         temporal_null_initial_probability: float = 0.90,
+        history_proposal_batch_size: int = 1,
     ) -> None:
         super().__init__()
+        if history_proposal_batch_size <= 0:
+            raise ValueError("history proposal batch size must be positive")
         self.maximum_history = int(maximum_history)
         self.maximum_prefix_tokens = int(maximum_prefix_tokens)
         self.vggt_token_dim = int(vggt_token_dim)
+        self.history_proposal_batch_size = int(history_proposal_batch_size)
+        self.channels_last_spatial = False
         self.temporal_null_initial_probability = float(
             temporal_null_initial_probability
         )
@@ -793,6 +828,8 @@ class M05PlusHead(nn.Module):
         spatial = state.transpose(1, 2).reshape(
             state.shape[0], -1, self.merged_bev_size, self.merged_bev_size
         )
+        if self.channels_last_spatial:
+            spatial = spatial.contiguous(memory_format=torch.channels_last)
         shared = self.shared_refinement(spatial)
         routing = self.routing_refinement(shared)
         evidence = self.evidence_refinement(shared)
@@ -801,6 +838,27 @@ class M05PlusHead(nn.Module):
             self.routing_head(routing),
             assemble_runtime_outputs=assemble_runtime_outputs,
         )
+
+    @classmethod
+    def _split_decoded_batch(cls, value, batch: int):
+        if isinstance(value, torch.Tensor):
+            if value.shape[0] != batch * 2:
+                raise ValueError("batched BEV decoder output has an invalid batch")
+            return value[:batch], value[batch:]
+        if isinstance(value, dict):
+            first = {}
+            second = {}
+            for key, child in value.items():
+                first[key], second[key] = cls._split_decoded_batch(child, batch)
+            return first, second
+        raise TypeError("BEV decoder outputs must be tensors or dictionaries")
+
+    def _unused_temporal_zero(self, anchor: torch.Tensor) -> torch.Tensor:
+        zero = anchor.new_zeros(())
+        for module in (self.history_proposal, self.temporal_attention):
+            for parameter in module.parameters():
+                zero = zero + parameter.reshape(-1)[0].to(anchor.dtype) * 0.0
+        return zero
 
     def forward(
         self,
@@ -864,41 +922,75 @@ class M05PlusHead(nn.Module):
                 [level[:, :1] for level in pyramid],
                 self.query.reference_grid,
             )
-            if include_latest_auxiliary:
-                output["latest_auxiliary_bev"] = self._decode_state(
-                    anchor, assemble_runtime_outputs=assemble_runtime_outputs
-                )
-            proposals: list[torch.Tensor] = []
-            contexts: list[torch.Tensor] = []
-            reliabilities: list[torch.Tensor] = []
-            ages: list[int] = []
             # Extraction order is latest -> oldest. Index zero owns VGGT's
             # special first-frame token and anchors the latest-centric BEV.
             frame_order = tuple(range(1, frames))
-            for frame_index in frame_order:
-                frame_pyramid = [
-                    level[:, frame_index : frame_index + 1]
+            proposal_chunks: list[torch.Tensor] = []
+            context_chunks: list[torch.Tensor] = []
+            for history_start in range(
+                1, frames, self.history_proposal_batch_size
+            ):
+                history_end = min(
+                    history_start + self.history_proposal_batch_size,
+                    frames,
+                )
+                history_count = history_end - history_start
+                batched_anchor = anchor[:, None].expand(
+                    -1, history_count, -1, -1
+                ).reshape(batch * history_count, anchor.shape[1], anchor.shape[2])
+                batched_context = self.prefix_reader(
+                    batched_anchor,
+                    camera_context[:, history_start:history_end].reshape(
+                        batch * history_count, -1
+                    ),
+                    register_context[:, history_start:history_end].reshape(
+                        batch * history_count,
+                        register_context.shape[2],
+                        register_context.shape[3],
+                    ),
+                )
+                batched_pyramid = [
+                    level[:, history_start:history_end].reshape(
+                        batch * history_count,
+                        1,
+                        level.shape[2],
+                        level.shape[3],
+                        level.shape[4],
+                    )
                     for level in pyramid
                 ]
-                frame_context = self.prefix_reader(
-                    anchor,
-                    camera_context[:, frame_index],
-                    register_context[:, frame_index],
-                )
-                proposals.append(
+                proposal_chunks.append(
                     self.history_proposal(
-                        anchor,
-                        frame_pyramid,
+                        batched_anchor,
+                        batched_pyramid,
                         self.query.reference_grid,
-                        frame_context,
+                        batched_context,
+                    ).view(batch, history_count, anchor.shape[1], anchor.shape[2])
+                )
+                context_chunks.append(
+                    batched_context.view(
+                        batch, history_count, anchor.shape[1], anchor.shape[2]
                     )
                 )
-                contexts.append(frame_context)
-                reliabilities.append(reliability[:, frame_index])
-                ages.append(frame_index)
+            if proposal_chunks:
+                proposal_tensor = torch.cat(proposal_chunks, dim=1)
+                context_tensor = torch.cat(context_chunks, dim=1)
+            else:
+                proposal_tensor = anchor.new_empty(
+                    batch, 0, anchor.shape[1], anchor.shape[2]
+                )
+                context_tensor = anchor.new_empty(
+                    batch, 0, anchor.shape[1], anchor.shape[2]
+                )
             merged, attention_mean, null_mean = self.temporal_attention(
-                anchor, proposals, contexts, reliabilities, ages
+                anchor,
+                proposal_tensor,
+                context_tensor,
+                reliability[:, 1:],
+                frame_order,
             )
+            if frames == 1:
+                merged = merged + self._unused_temporal_zero(anchor)
             output["history_frame_indices_newest_to_oldest"] = frame_order
             output["history_original_indices_newest_to_oldest"] = tuple(
                 range(frames - 2, -1, -1)
@@ -907,9 +999,19 @@ class M05PlusHead(nn.Module):
             output["temporal_null_attention_mean"] = null_mean
             # Compatibility diagnostic name used by the common trainer.
             output["history_update_gate_mean"] = attention_mean
-            output["merged_bev"] = self._decode_state(
-                merged, assemble_runtime_outputs=assemble_runtime_outputs
-            )
+            if include_latest_auxiliary:
+                decoded = self._decode_state(
+                    torch.cat((anchor, merged), dim=0),
+                    assemble_runtime_outputs=assemble_runtime_outputs,
+                )
+                (
+                    output["latest_auxiliary_bev"],
+                    output["merged_bev"],
+                ) = self._split_decoded_batch(decoded, batch)
+            else:
+                output["merged_bev"] = self._decode_state(
+                    merged, assemble_runtime_outputs=assemble_runtime_outputs
+                )
         if include_scale:
             scale_reliability = self.scale_frame_reliability(prefix)
             output["scale_frame_reliability"] = scale_reliability

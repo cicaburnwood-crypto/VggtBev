@@ -159,6 +159,55 @@ def test_m05_plus_uses_per_query_frame_attention_and_null() -> None:
     assert four["strict_zero_history_residual"]
 
 
+def test_history_proposal_batching_preserves_predictions() -> None:
+    torch.manual_seed(27)
+    sequential = _model().eval()
+    batched = _model().eval()
+    batched.load_state_dict(sequential.state_dict(), strict=True)
+    batched.head.history_proposal_batch_size = 4
+    extraction = _extraction(4)
+    sequential_output = sequential.forward_head(
+        extraction,
+        include_scale=True,
+        include_latest_auxiliary=True,
+        assemble_runtime_outputs=False,
+    )
+    batched_output = batched.forward_head(
+        extraction,
+        include_scale=True,
+        include_latest_auxiliary=True,
+        assemble_runtime_outputs=False,
+    )
+    for branch in ("merged_bev", "latest_auxiliary_bev"):
+        for key in ("observed_gate_logit", "fov_support_logit"):
+            torch.testing.assert_close(
+                batched_output[branch][key],
+                sequential_output[branch][key],
+                atol=2e-5,
+                rtol=2e-5,
+            )
+        torch.testing.assert_close(
+            batched_output[branch]["guessed"]["raw"],
+            sequential_output[branch]["guessed"]["raw"],
+            atol=2e-5,
+            rtol=2e-5,
+        )
+    torch.testing.assert_close(
+        batched_output["temporal_frame_attention_mean"],
+        sequential_output["temporal_frame_attention_mean"],
+        atol=2e-5,
+        rtol=2e-5,
+    )
+
+
+def test_single_frame_connects_all_temporal_parameters_for_ddp() -> None:
+    model = _model().train()
+    output = model.forward_head(_extraction(1), assemble_runtime_outputs=False)
+    output["merged_bev"]["observed_gate_logit"].sum().backward()
+    for module in (model.head.history_proposal, model.head.temporal_attention):
+        assert all(parameter.grad is not None for parameter in module.parameters())
+
+
 def test_m05_plus_reverses_only_at_vggt_boundary() -> None:
     adapter = _RecordingAdapter()
     model = _model()

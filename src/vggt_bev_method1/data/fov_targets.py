@@ -57,7 +57,13 @@ def _metric_to_pixel(
     cell = output_extent_m / output_size
     column = (polygon_xz[:, 0] + output_extent_m / 2.0) / cell - 0.5
     row = (output_extent_m / 2.0 - polygon_xz[:, 1]) / cell - 0.5
-    return list(zip(column.tolist(), row.tolist(), strict=True))
+    if column.shape != row.shape:
+        raise RuntimeError("FOV raster coordinate arrays must align")
+    return list(
+        zip(  # noqa: B905 - Python 3.9
+            column.tolist(), row.tolist()
+        )
+    )
 
 
 def fov_union_mask(

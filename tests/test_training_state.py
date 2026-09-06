@@ -728,6 +728,24 @@ def test_session_prefix_sampler_rotates_prefixes_deterministically() -> None:
     assert list(repeated) == list(sampler)
 
 
+def test_session_prefix_sampler_applies_history_curriculum() -> None:
+    source = _PrefixDataset()
+    sampler = SessionPrefixSampler(
+        source,
+        seed=23,
+        shuffle=False,
+        history_cap_by_epoch=(1, 2, 5),
+    )
+    observed_maxima = []
+    for epoch in range(3):
+        sampler.set_epoch(epoch)
+        histories = [source.samples[index].target_frame + 1 for index in sampler]
+        observed_maxima.append(max(histories))
+        assert max(histories) <= (1, 2, 5)[epoch]
+    assert observed_maxima[0] == 1
+    assert observed_maxima[-1] > observed_maxima[0]
+
+
 def test_session_prefix_sampler_batches_equal_history_across_ddp_ranks() -> None:
     source = _PrefixDataset()
     samplers = [

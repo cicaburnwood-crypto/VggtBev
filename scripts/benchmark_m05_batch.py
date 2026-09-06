@@ -12,7 +12,10 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
-from vggt_bev_method1.cli_train_m05 import _forward_losses
+from vggt_bev_method1.cli_train_m05 import (
+    _configure_m05_execution,
+    _forward_losses,
+)
 from vggt_bev_method1.cli_train_m05 import build_model as build_m05_model
 from vggt_bev_method1.cli_train_m05_plus import build_model as build_m05_plus_model
 from vggt_bev_method1.cli_train_metric import _configure_head_compilation
@@ -63,6 +66,11 @@ def main() -> None:
         help="Override the configured session order for a diagnostic manifest",
     )
     parser.add_argument(
+        "--maximum-sessions",
+        type=int,
+        help="Match a diagnostic manifest that freezes a finite prefix",
+    )
+    parser.add_argument(
         "--split-seed",
         type=int,
         help="Override the configured split seed for a diagnostic manifest",
@@ -96,6 +104,10 @@ def main() -> None:
         config["data"]["split_manifest"] = str(args.split_manifest)
     if args.session_selection_order is not None:
         config["data"]["session_selection_order"] = args.session_selection_order
+    if args.maximum_sessions is not None:
+        if args.maximum_sessions <= 0:
+            raise ValueError("maximum sessions must be positive")
+        config["data"]["maximum_sessions"] = args.maximum_sessions
     if args.split_seed is not None:
         config["data"]["split_seed"] = args.split_seed
     if args.query_chunk_size is not None:
@@ -120,16 +132,10 @@ def main() -> None:
     model = build_model(config, device)
     for parameter in model.unwrapped_head().parameters():
         parameter.requires_grad_(True)
-    deformable_attention_modules = 0
-    for module in model.unwrapped_head().modules():
-        if hasattr(module, "memory_efficient_checkpoint_fraction"):
-            module.memory_efficient_checkpoint_fraction = (
-                args.attention_checkpoint_fraction
-            )
-            module.memory_efficient_training = (
-                args.attention_checkpoint_fraction > 0.0
-            )
-            deformable_attention_modules += 1
+    config["training"]["attention_checkpoint_fraction"] = (
+        args.attention_checkpoint_fraction
+    )
+    execution = _configure_m05_execution(model, config["training"])
     compilation = _configure_head_compilation(model, config["training"])
     if distributed:
         model.head = DistributedDataParallel(
@@ -308,7 +314,8 @@ def main() -> None:
                 "peak_reserved_gib": torch.cuda.max_memory_reserved(device) / 2**30,
                 "query_chunk_size": int(config["model"]["cross_query_chunk_size"]),
                 "attention_checkpoint_fraction": args.attention_checkpoint_fraction,
-                "deformable_attention_modules": deformable_attention_modules,
+                "deformable_attention_modules": execution["attention_modules"],
+                "execution": execution,
                 "effective_supervision": float(
                     values["target_effective_supervision_fraction"].detach().cpu()
                 ),

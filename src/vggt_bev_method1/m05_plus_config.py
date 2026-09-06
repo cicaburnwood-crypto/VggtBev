@@ -78,6 +78,9 @@ def validate_m05_plus_config(config: dict[str, Any]) -> None:
     compatible["training"]["pipeline"] = compatible["model"][
         "pipeline_variant"
     ]
+    # M05+ connects every temporal parameter to N=1 with an exact zero graph
+    # dependency, so production can disable DDP's unused-parameter traversal.
+    compatible["training"]["ddp_find_unused_parameters"] = True
     validate_m05_config(compatible)
 
     if model.get("geometry_conditioning") != GEOMETRY_CONDITIONING:
@@ -176,3 +179,49 @@ def validate_m05_plus_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "training.latest_auxiliary_multiplier must be in [0,1]"
         )
+    interval = int(training.get("latest_auxiliary_interval", 1))
+    if interval <= 0:
+        raise ValueError("training.latest_auxiliary_interval must be positive")
+    full_fraction = float(training.get("latest_auxiliary_full_fraction", 1.0))
+    if not 0.0 <= full_fraction <= 1.0:
+        raise ValueError(
+            "training.latest_auxiliary_full_fraction must be in [0,1]"
+        )
+    if latest_multiplier * interval > 1.0:
+        raise ValueError(
+            "latest auxiliary multiplier times interval must not exceed 1"
+        )
+    proposal_batch = int(model.get("history_proposal_batch_size", 1))
+    if not 1 <= proposal_batch <= int(model["maximum_history"]):
+        raise ValueError(
+            "model.history_proposal_batch_size must be in [1, maximum_history]"
+        )
+    checkpoint_fraction = float(
+        training.get("attention_checkpoint_fraction", 1.0)
+    )
+    if not 0.0 <= checkpoint_fraction <= 1.0:
+        raise ValueError(
+            "training.attention_checkpoint_fraction must be in [0,1]"
+        )
+    curriculum = tuple(
+        int(value) for value in training.get("history_cap_by_epoch", ())
+    )
+    if curriculum:
+        epochs = int(training["epochs"])
+        maximum_history = int(model["maximum_history"])
+        if len(curriculum) != epochs:
+            raise ValueError(
+                "training.history_cap_by_epoch must contain one cap per epoch"
+            )
+        if any(
+            not 1 <= cap <= maximum_history for cap in curriculum
+        ):
+            raise ValueError(
+                "history curriculum caps must be in [1, maximum_history]"
+            )
+        if tuple(sorted(curriculum)) != curriculum:
+            raise ValueError("history curriculum caps must be nondecreasing")
+        if curriculum[-1] != maximum_history:
+            raise ValueError(
+                "history curriculum must reach maximum_history in the final epoch"
+            )

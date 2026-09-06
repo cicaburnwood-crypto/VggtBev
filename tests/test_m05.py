@@ -8,6 +8,7 @@ from torch import nn
 
 from vggt_bev_method1.cli_train_m05 import (
     _contract,
+    _latest_auxiliary_execution,
     _load_checkpoint,
     _save_checkpoint,
 )
@@ -396,6 +397,48 @@ def test_m05_plus_zero_latest_multiplier_equals_merged_only() -> None:
         loss_combination="merged_primary_additive",
     )
     torch.testing.assert_close(result["loss"], result["merged_loss"])
+
+
+def test_latest_auxiliary_subsampling_preserves_expected_multiplier() -> None:
+    training = {
+        "latest_auxiliary_multiplier": 0.10,
+        "latest_auxiliary_interval": 4,
+        "latest_auxiliary_full_fraction": 0.20,
+    }
+    assert _latest_auxiliary_execution(
+        training, global_step=19, total_steps=100
+    ) == (True, 0.10)
+    assert _latest_auxiliary_execution(
+        training, global_step=20, total_steps=100
+    ) == (True, 0.40)
+    assert _latest_auxiliary_execution(
+        training, global_step=21, total_steps=100
+    ) == (False, 0.0)
+    assert _latest_auxiliary_execution(
+        training, global_step=21, total_steps=100, force=True
+    ) == (True, 0.10)
+
+
+def test_m05_loss_accepts_skipped_latest_branch_at_zero_weight() -> None:
+    prediction = _model().train().forward_head(
+        _extraction(3),
+        include_scale=False,
+        include_latest_auxiliary=False,
+        assemble_runtime_outputs=False,
+    )
+    result = m05_bev_loss(
+        prediction["merged_bev"],
+        None,
+        _target(),
+        None,
+        weights=m05_loss_weights({}),
+        global_step=10,
+        total_steps=100,
+        latest_auxiliary_weight=0.0,
+        loss_combination="merged_primary_additive",
+    )
+    torch.testing.assert_close(result["loss"], result["merged_loss"])
+    assert result["latest_auxiliary_active"].item() == 0.0
 
 
 def test_m05_checkpoint_roundtrip_is_strict(tmp_path: Path) -> None:

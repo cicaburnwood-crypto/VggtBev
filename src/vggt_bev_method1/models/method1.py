@@ -323,7 +323,11 @@ class MetricScaleTokenHead(nn.Module):
             memory_weight = frame_reliability.repeat(1, len(pyramid))
         memory = memory + self.level_embedding
         token = self.scale_token.expand(batch, -1, -1)
-        for norm, attention in zip(self.norms, self.blocks, strict=True):
+        if len(self.norms) != len(self.blocks):
+            raise RuntimeError("scale decoder normalization/block count mismatch")
+        for norm, attention in zip(  # noqa: B905 - Python 3.9
+            self.norms, self.blocks
+        ):
             token = token + attention(
                 norm(token),
                 memory,

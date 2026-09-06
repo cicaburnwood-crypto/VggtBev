@@ -68,6 +68,9 @@ def build_model(config: dict, device: torch.device) -> M05PlusSystem:
         temporal_null_initial_probability=float(
             values["temporal_null_initial_probability"]
         ),
+        history_proposal_batch_size=int(
+            values.get("history_proposal_batch_size", 1)
+        ),
     ).to(device)
 
 
@@ -126,6 +129,20 @@ def build_checkpoint_contract(
             "latest_auxiliary_multiplier": float(
                 training["latest_auxiliary_multiplier"]
             ),
+            "latest_auxiliary_interval": int(
+                training.get("latest_auxiliary_interval", 1)
+            ),
+            "latest_auxiliary_full_fraction": float(
+                training.get("latest_auxiliary_full_fraction", 1.0)
+            ),
+            "history_cap_by_epoch": tuple(
+                int(value)
+                for value in training.get("history_cap_by_epoch", ())
+            ),
+            "history_proposal_batch_size": int(
+                model.get("history_proposal_batch_size", 1)
+            ),
+            "latest_merged_shared_decoder_batching": True,
         }
     )
     return contract

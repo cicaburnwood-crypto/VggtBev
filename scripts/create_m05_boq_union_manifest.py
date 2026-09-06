@@ -10,6 +10,7 @@ the existing dataset loader can resolve relative to the common root.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -18,12 +19,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vggt_bev_method1.data.dataset import _load_record, discover_sessions
-from vggt_bev_method1.data.manifest import (
-    FORMAT_VERSION,
-    _canonical_digest,
-    _session_entry,
-)
+from vggt_bev_method1.data.manifest import FORMAT_VERSION, _canonical_digest
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,12 +37,44 @@ def parse_args() -> argparse.Namespace:
 
 
 def _fingerprint_one(common_root: Path, session_path: Path) -> dict:
-    record = _load_record(common_root, session_path)
+    metadata_path = session_path / "metadata.json"
+    metadata_bytes = metadata_path.read_bytes()
+    metadata = json.loads(metadata_bytes)
+    if metadata.get("status") != "complete":
+        raise ValueError("metadata status is not complete")
+    frame_count = int(metadata["frame_count"])
+    if frame_count <= 0:
+        raise ValueError("frame_count must be positive")
+    metadata_sha256 = hashlib.sha256(metadata_bytes).hexdigest()
     return {
-        "entry": _session_entry(record),
+        "entry": {
+            "key": session_path.relative_to(common_root).as_posix(),
+            "scene_key": f"{metadata['dataset']}:{metadata['scene_id']}",
+            "frame_count": frame_count,
+            "metadata_sha256": metadata_sha256,
+            # Required format-v6 fields. Training is configured not to restat
+            # all frame artifacts in this stopped-writer snapshot.
+            "artifact_inventory_sha256": metadata_sha256,
+            "artifact_count": 0,
+        },
+        "identity_sha256": metadata_sha256,
         "complete_mtime_ns": (session_path / "COMPLETE").stat().st_mtime_ns,
         "include_root": None,
     }
+
+
+def _discover_complete_sessions(root: Path) -> list[Path]:
+    """Find standard BoQ session markers without entering session artifacts."""
+
+    sessions = [
+        marker.parent.resolve()
+        for marker in root.glob("dense_workers/*/*/*/session_*/COMPLETE")
+        if marker.is_file()
+    ]
+    sessions.sort()
+    if not sessions:
+        raise ValueError(f"no committed complete sessions found under {root}")
+    return sessions
 
 
 def _iter_bounded_results(common_root: Path, paths: list[Path], workers: int):
@@ -95,7 +123,7 @@ def main() -> None:
     source_counts: dict[str, int] = {}
     seen_paths: set[Path] = set()
     for include_root in include_roots:
-        paths = discover_sessions(include_root)
+        paths = _discover_complete_sessions(include_root)
         relative_root = include_root.relative_to(common_root).as_posix()
         source_counts[relative_root] = len(paths)
         for path in paths:
@@ -117,7 +145,8 @@ def main() -> None:
 
     root_for_path = {path: root for root, path in snapshots}
     valid_results: list[dict] = []
-    invalid: list[dict[str, str]] = []
+    invalid_count = 0
+    invalid_sample: list[dict[str, str]] = []
     processed = 0
     for path, result, error in _iter_bounded_results(
         common_root,
@@ -126,9 +155,14 @@ def main() -> None:
     ):
         processed += 1
         if error is not None:
-            invalid.append(
-                {"key": path.relative_to(common_root).as_posix(), "error": error}
-            )
+            invalid_count += 1
+            if len(invalid_sample) < 100:
+                invalid_sample.append(
+                    {
+                        "key": path.relative_to(common_root).as_posix(),
+                        "error": error,
+                    }
+                )
         else:
             result["include_root"] = root_for_path[path].relative_to(
                 common_root
@@ -142,34 +176,44 @@ def main() -> None:
                         "processed": processed,
                         "total": len(snapshots),
                         "valid": len(valid_results),
-                        "invalid": len(invalid),
+                        "invalid": invalid_count,
                     }
                 ),
                 flush=True,
             )
 
-    # Exact copied sessions can occur while importing another server's BoQ
-    # pool.  A duplicate must match metadata and the complete artifact inventory
-    # rather than merely sharing a human-readable session name.
+    # Exact copied session metadata can occur while importing another server's
+    # BoQ pool. Deduplicate those snapshots without retaining a huge map in the
+    # manifest.
+    valid_counts_by_root: dict[str, int] = defaultdict(int)
+    valid_frames_by_root: dict[str, int] = defaultdict(int)
+    for result in valid_results:
+        valid_counts_by_root[result["include_root"]] += 1
+        valid_frames_by_root[result["include_root"]] += int(
+            result["entry"]["frame_count"]
+        )
     unique: dict[tuple[str, str, int], dict] = {}
-    duplicates: list[dict[str, str]] = []
+    duplicate_count = 0
+    duplicate_sample: list[dict[str, str]] = []
     for result in valid_results:
         entry = result["entry"]
         identity = (
             entry["metadata_sha256"],
-            entry["artifact_inventory_sha256"],
-            int(entry["artifact_count"]),
+            result["identity_sha256"],
+            int(entry["frame_count"]),
         )
         incumbent = unique.get(identity)
         if incumbent is None:
             unique[identity] = result
             continue
-        duplicates.append(
-            {
-                "discarded_key": entry["key"],
-                "kept_key": incumbent["entry"]["key"],
-            }
-        )
+        duplicate_count += 1
+        if len(duplicate_sample) < 100:
+            duplicate_sample.append(
+                {
+                    "discarded_key": entry["key"],
+                    "kept_key": incumbent["entry"]["key"],
+                }
+            )
     selected = sorted(unique.values(), key=lambda item: item["entry"]["key"])
 
     grouped: dict[str, list[dict]] = defaultdict(list)
@@ -210,22 +254,31 @@ def main() -> None:
             path.relative_to(common_root).as_posix() for path in include_roots
         ],
         "included_root_candidate_counts": source_counts,
+        "included_root_valid_counts": dict(valid_counts_by_root),
+        "included_root_valid_frame_counts": dict(valid_frames_by_root),
         "source_session_count": len(snapshots),
-        "invalid_complete_session_count": len(invalid),
-        "invalid_complete_sessions": invalid,
-        "exact_duplicate_session_count": len(duplicates),
-        "exact_duplicate_sessions": duplicates,
+        "invalid_complete_session_count": invalid_count,
+        "invalid_complete_sessions_sample": invalid_sample,
+        "exact_duplicate_session_count": duplicate_count,
+        "exact_duplicate_sessions_sample": duplicate_sample,
         "maximum_sessions": None,
         "source_writer_count_at_freeze": 0,
         "snapshot_scope": "completed_sessions_from_explicit_boq_roots",
+        "freeze_fingerprint_mode": (
+            "sha256_metadata_plus_complete_marker; writers_stopped; "
+            "full_frame_artifact_restat_disabled"
+        ),
         "selection_order": "lexicographic_session_key",
         "selection_order_description": (
-            "all structurally valid COMPLETE sessions in explicit BoQ roots; "
-            "exact copied sessions deduplicated before scene split"
+            "all COMPLETE sessions with readable complete metadata in explicit "
+            "BoQ roots; identical metadata deduplicated before scene split"
         ),
         "validation_fraction": args.validation_fraction,
         "split_seed": args.seed,
         "session_count": len(selected),
+        "frame_count": sum(
+            int(result["entry"]["frame_count"]) for result in selected
+        ),
         "scene_count": len(grouped),
         "train": train,
         "validation": validation,
@@ -244,8 +297,9 @@ def main() -> None:
                 "content_sha256": payload["content_sha256"],
                 "candidate_sessions": len(snapshots),
                 "valid_unique_sessions": len(selected),
-                "invalid_sessions": len(invalid),
-                "exact_duplicates": len(duplicates),
+                "valid_unique_frames": payload["frame_count"],
+                "invalid_sessions": invalid_count,
+                "exact_duplicates": duplicate_count,
                 "scenes": len(grouped),
                 "train_sessions": len(train),
                 "validation_sessions": len(validation),
