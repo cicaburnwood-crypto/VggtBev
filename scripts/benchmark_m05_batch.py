@@ -19,6 +19,7 @@ from vggt_bev_method1.cli_train_m05 import (
 from vggt_bev_method1.cli_train_m05 import build_model as build_m05_model
 from vggt_bev_method1.cli_train_m05_plus import build_model as build_m05_plus_model
 from vggt_bev_method1.cli_train_metric import _configure_head_compilation
+from vggt_bev_method1.data import RGBResizePad, VGGNAVMethod1Dataset
 from vggt_bev_method1.m05_config import load_m05_config
 from vggt_bev_method1.m05_plus_config import load_m05_plus_config
 from vggt_bev_method1.m05_train_utils import build_m05_datasets, m05_collate
@@ -77,8 +78,13 @@ def main() -> None:
     )
     parser.add_argument("--batch-size", required=True, type=int)
     parser.add_argument("--history", required=True, type=int)
+    parser.add_argument(
+        "--session-key",
+        help="Load one diagnostic session directly, without a split manifest",
+    )
     parser.add_argument("--steps", type=int, default=3)
     parser.add_argument("--query-chunk-size", type=int)
+    parser.add_argument("--history-proposal-batch-size", type=int)
     parser.add_argument(
         "--attention-checkpoint-fraction",
         type=float,
@@ -114,11 +120,39 @@ def main() -> None:
         if args.query_chunk_size <= 0:
             raise ValueError("query chunk size must be positive")
         config["model"]["cross_query_chunk_size"] = args.query_chunk_size
+    if args.history_proposal_batch_size is not None:
+        if args.history_proposal_batch_size <= 0:
+            raise ValueError("history proposal batch size must be positive")
+        config["model"]["history_proposal_batch_size"] = (
+            args.history_proposal_batch_size
+        )
     # Compilation is deliberately disabled here: the server's current Inductor
     # stack is not stable, and eager BF16 is the production-safe comparison.
     config["training"]["compile_head"] = False
 
-    train_dataset, _ = build_m05_datasets(config, verify_manifest=False)
+    if args.session_key is None:
+        train_dataset, _ = build_m05_datasets(config, verify_manifest=False)
+    else:
+        data = config["data"]
+        train_dataset = VGGNAVMethod1Dataset(
+            root=data["root"],
+            supervision=data["supervision"],
+            preprocess=RGBResizePad(
+                int(data["image_height"]), int(data["image_width"])
+            ),
+            session_keys=[args.session_key],
+            sample_stride=int(data["sample_stride"]),
+            minimum_history=int(data["minimum_history"]),
+            maximum_history=int(data["maximum_history"]),
+            merged_source_extent_m=float(data["merged_source_extent_m"]),
+            merged_source_image_size=int(data["merged_source_image_size"]),
+            merged_complete_directory=str(data["merged_complete_directory"]),
+            merged_masked_directory=str(data["merged_masked_directory"]),
+            merged_bev_extent_m=float(data["merged_source_extent_m"]),
+            merged_bev_output_size=int(data["merged_source_output_size"]),
+            include_single_targets=False,
+            include_latest_temporal_targets=True,
+        )
     sample = _sample_with_history(train_dataset, args.history)
     batch = m05_collate([sample for _ in range(args.batch_size)])
     world_size = int(os.environ.get("WORLD_SIZE", "1"))

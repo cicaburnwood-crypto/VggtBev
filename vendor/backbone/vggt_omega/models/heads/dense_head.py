@@ -6,6 +6,8 @@
 
 # Inspired by https://github.com/DepthAnything/Depth-Anything-V2
 
+from __future__ import annotations
+
 import math
 from typing import Tuple
 

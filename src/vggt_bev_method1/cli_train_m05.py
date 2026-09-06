@@ -169,7 +169,6 @@ def _configure_m05_execution(model: M05System, training: dict) -> dict[str, obje
             attention_modules += 1
     channels_last = bool(training.get("channels_last", False))
     if channels_last:
-        model.unwrapped_head().to(memory_format=torch.channels_last)
         if hasattr(model.unwrapped_head(), "channels_last_spatial"):
             model.unwrapped_head().channels_last_spatial = True
     cudnn_benchmark = bool(training.get("cudnn_benchmark", False))
