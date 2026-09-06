@@ -12,14 +12,14 @@ RGB window (1..10 frames)
   -> split every 2048D patch token into local/global 1024D streams
   -> independent local/global projection and DPT-lite top-down fusion
   -> Camera/Register token contextualization without pooling
-  -> latest-frame 512x512 anchor
+  -> latest-frame 256x256 anchor
   -> shared historical proposal decoder, once per historical frame
      (every BEV cell reads Camera + 16 Register slots by content attention)
   -> per-cell softmax over [no update, newest history, ..., oldest history]
   -> shared spatial refinement
      -> routing refinement -> FOV support + observed gate
      -> evidence refinement -> Beta occupancy evidence
-  -> 10m x 10m, 512x512 merged BEV
+  -> 10m x 10m, 256x256 merged BEV
 ```
 
 Each output cell independently selects useful temporal evidence. The learned
@@ -74,7 +74,7 @@ per cell rather than through one spatially uniform broadcast vector.
 | Spatial refinement | 1 shared | 2 shared + 1 routing + 1 evidence |
 
 Keeping the dense BEV state at 96 and query content at 64 avoids an unnecessary
-512x512 activation explosion. Prefix capacity remains concentrated in the
+dense activation explosion. Prefix capacity remains concentrated in the
 short 170-token maximum sequence, but it is trained only as a content path for
 the end-to-end BEV objective and is not interpreted or supervised as geometry.
 
@@ -91,10 +91,11 @@ the end-to-end BEV objective and is not interpreted or supervised as geometry.
 
 ## Training contract
 
-The fixed 10m x 10m GT, 512x512 native output, dataset loader, evidential
-occupancy formulation, routing targets, and Scale supervision remain inherited
-from M05. M05+'s branch combination is intentionally corrected to make Merged
-the primary objective:
+The fixed 10m x 10m GT, dataset loader, evidential occupancy formulation,
+routing targets, and Scale supervision remain inherited from M05. The frozen
+512x512 categorical GT is reduced to the native 256x256 training/output grid
+with nearest-neighbor sampling. M05+'s branch combination is intentionally
+corrected to make Merged the primary objective:
 
 ```text
 L_BEV = 1.0 * L_merged + 0.10 * L_latest_auxiliary
@@ -120,8 +121,8 @@ while removing redundant execution:
 - Per-cell temporal logits and proposal fusion are tensorized across history.
 - Latest and Merged states share one batched spatial decode whenever the
   training-only Latest auxiliary branch is active.
-- Cross-attention uses 65,536-query chunks and rematerializes 50% of chunks in
-  backward. This exchanges compute for memory without changing the function.
+- Cross-attention uses one 65,536-query chunk. Attention rematerialization is
+  disabled because the 256x256 grid fits in A100 memory, avoiding recomputation.
 - Spatial activations use channels-last layout; cuDNN benchmarking, BF16
   autocast, fused AdamW, pinned persistent workers, and four-batch prefetching
   are enabled.
@@ -131,17 +132,18 @@ while removing redundant execution:
 The Latest auxiliary objective is evaluated on every step for the first 20% of
 training. It is then evaluated every fourth step at four times its nominal
 multiplier, preserving its expected `0.10` contribution while avoiding three
-of four auxiliary decodes. History caps `[3, 5, 8, 10, 10]` progressively expose
-longer windows over the five epochs.
+of four auxiliary decodes. History caps `[3, 5, 8, 10, 10, 10, 10, 10, 10, 10]`
+progressively expose longer windows over the ten epochs.
 
 ## Frozen 8×A100 run
 
 The checked-in production profile is
-`configs/m05_plus_a100_8gpu_5e_frozen.toml`:
+`configs/m05_plus_a100_8gpu_10e_256_frozen.toml`:
 
 | Item | Frozen value |
 |---|---:|
-| Epochs | 5 |
+| Epochs | 10 |
+| Native BEV output | 256 x 256 over 10m x 10m |
 | A100 GPUs | 8 |
 | Batch per GPU / global batch | 1 / 8 |
 | Optimizer | fused AdamW |
@@ -150,7 +152,7 @@ The checked-in production profile is
 | Gradient clip | `1.0`, separately for BEV and Scale |
 | Validation batches | 500 |
 | Checkpoint interval | 5,000 steps |
-| Total optimizer steps | 334,570 |
+| Total optimizer steps | 669,140 |
 
 The valid frozen union contains 561,533 sessions across 1,076 scenes:
 

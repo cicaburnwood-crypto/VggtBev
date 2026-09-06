@@ -1,7 +1,8 @@
 # M05+ Per-cell Temporal Merged BEV
 
 M05+ is the active branch pipeline. It maps a 1–10 frame RGB window to a native
-512 x 512 evidential BEV over a fixed 10 x 10 m extent. The frozen VGGT runs
+256 x 256 evidential BEV over a fixed 10 x 10 m extent. Frozen 512 x 512
+categorical targets are downsampled once with nearest-neighbor sampling. The frozen VGGT runs
 once; local/global patch-token halves remain separate through DPT-lite/FPN;
 Camera and sixteen Register tokens remain distinct through prefix attention;
 and every BEV cell independently attends over the latest anchor, historical

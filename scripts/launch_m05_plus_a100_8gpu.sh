@@ -36,4 +36,4 @@ exec "$python_bin" -m torch.distributed.run \
     --master_addr=127.0.0.1 \
     --master_port=29505 \
     -m vggt_bev_method1.cli_train_m05_plus \
-    --config configs/m05_plus_a100_8gpu_5e_frozen.toml
+    --config configs/m05_plus_a100_8gpu_10e_256_frozen.toml
