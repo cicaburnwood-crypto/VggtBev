@@ -4,9 +4,8 @@ set -euo pipefail
 root=/mnt/data/benyun/Leju-Kuavo5W/vbev
 code="$root/m05_plus_train"
 python_bin="$root/micromamba/envs/openpi/bin/python"
-manifest="$code/manifests/m05_plus_union_pro6000_5090_a100_frozen_20260906.json"
-session_cache="$code/cache/m05_plus_union_8aa61a_session_records.pkl"
-manifest_sha256=8aa61a194b362de66cc70c8df2fa8d44ba829940a7c31fdd3e39a51b552c71b8
+manifest="$code/manifests/m05_plus_union_pro6000_5090_a100_valid_20260906.json"
+session_cache="$code/cache/m05_plus_union_valid_session_records.pkl"
 
 while [[ ! -f "$session_cache" ]]; do
     if ! pgrep -f 'scripts/build_session_record_cache.py' >/dev/null; then
@@ -16,6 +15,8 @@ while [[ ! -f "$session_cache" ]]; do
     echo "waiting_for_session_record_cache path=$session_cache"
     sleep 30
 done
+
+manifest_sha256="$("$python_bin" -c 'import json,sys; print(json.load(open(sys.argv[1]))["content_sha256"])' "$manifest")"
 
 cd "$code"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
