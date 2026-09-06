@@ -108,7 +108,7 @@ retains its original convex-loss behavior.
 
 The pipeline ID is shared by configuration, model runtime, and checkpoint
 metadata. The incompatible architecture uses checkpoint schema
-`m05plus-dpt-role-token-per-query-temporal-fixed-metric-512-v3` and must start
+`m05plus-dpt-role-token-per-query-temporal-fixed-metric-v3` and must start
 fresh. V1/v2 checkpoints cannot strict-resume v3.
 
 ## Current execution path

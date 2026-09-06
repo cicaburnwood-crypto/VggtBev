@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 PIPELINE_ID = "M05PLUS-PER-QUERY-TEMPORAL-ATTENTION-LARGE-METRIC-NLL"
-CHECKPOINT_SCHEMA = (
-    "m05plus-dpt-role-token-per-query-temporal-fixed-metric-512-v3"
-)
+CHECKPOINT_SCHEMA = "m05plus-dpt-role-token-per-query-temporal-fixed-metric-v3"
 
 GEOMETRY_CONDITIONING = "none"
 PATCH_FUSION = "dpt_lite_top_down"

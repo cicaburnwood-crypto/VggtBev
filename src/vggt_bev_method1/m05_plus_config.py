@@ -78,10 +78,21 @@ def validate_m05_plus_config(config: dict[str, Any]) -> None:
     compatible["training"]["pipeline"] = compatible["model"][
         "pipeline_variant"
     ]
+    # The base M05 validator intentionally fixes the legacy output at 512.
+    # M05+ keeps the same 512 source rasters but may train its dense head at
+    # either 256 or 512, so normalize only these two compatibility fields.
+    compatible["data"]["merged_source_output_size"] = 512
+    compatible["model"]["merged_bev_output_size"] = 512
     # M05+ connects every temporal parameter to N=1 with an exact zero graph
     # dependency, so production can disable DDP's unused-parameter traversal.
     compatible["training"]["ddp_find_unused_parameters"] = True
     validate_m05_config(compatible)
+
+    output_size = int(model.get("merged_bev_output_size", 0))
+    if output_size not in (256, 512):
+        raise ValueError("M05+ merged BEV output must be 256x256 or 512x512")
+    if int(config["data"].get("merged_source_output_size", 0)) != output_size:
+        raise ValueError("M05+ supervision and model output sizes must match")
 
     if model.get("geometry_conditioning") != GEOMETRY_CONDITIONING:
         raise ValueError("M05+ forbids explicit geometry conditioning")
