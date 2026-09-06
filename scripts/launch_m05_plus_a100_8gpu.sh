@@ -30,7 +30,10 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 echo "training_launch manifest=$manifest manifest_sha256=$manifest_sha256"
 exec "$python_bin" -m torch.distributed.run \
-    --standalone \
+    --nnodes=1 \
+    --node_rank=0 \
     --nproc_per_node=8 \
+    --master_addr=127.0.0.1 \
+    --master_port=29505 \
     -m vggt_bev_method1.cli_train_m05_plus \
     --config configs/m05_plus_a100_8gpu_5e_frozen.toml
