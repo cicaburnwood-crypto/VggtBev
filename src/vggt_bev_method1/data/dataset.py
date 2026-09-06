@@ -355,6 +355,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         merged_bev_output_size: int = 800,
         include_single_targets: bool = True,
         include_latest_temporal_targets: bool = False,
+        missing_depth_policy: str = "error",
     ) -> None:
         if supervision != "metric_fov_complete_evidential":
             raise ValueError(
@@ -382,6 +383,8 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
             )
         if merged_bev_output_size <= 0:
             raise ValueError("Merged output size must be positive")
+        if missing_depth_policy not in {"error", "invalid"}:
+            raise ValueError("missing_depth_policy must be error or invalid")
         self.root = Path(root).expanduser().resolve()
         self.supervision = supervision
         self.preprocess = preprocess or RGBResizePad()
@@ -397,6 +400,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         self.include_latest_temporal_targets = bool(
             include_latest_temporal_targets
         )
+        self.missing_depth_policy = str(missing_depth_policy)
         self.void_coverage = (
             VoidCoverageIndex(
                 void_coverage_index,
@@ -641,6 +645,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
         images: list[torch.Tensor] = []
         depths: list[torch.Tensor] = []
         depth_valid: list[torch.Tensor] = []
+        missing_depth_frame_ids: list[int] = []
         for frame in range(target_frame + 1):
             rgb_path = _resolve_raster_path(
                 session.path / "camera" / f"frame_{frame:06d}.png"
@@ -657,7 +662,16 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 / "depth"
                 / f"frame_{frame:06d}{session.depth_suffix}"
             )
-            source_depth = self._load_depth(depth_path)
+            if depth_path.is_file() or self.missing_depth_policy == "error":
+                source_depth = self._load_depth(depth_path)
+            else:
+                # Depth supervises only the independent Scale branch.  Keep
+                # the RGB/BEV sample and mark this absent label fully invalid.
+                source_depth = np.zeros(
+                    (session.source_height, session.source_width),
+                    dtype=np.float32,
+                )
+                missing_depth_frame_ids.append(frame)
             if session.source_gt_depth_convention == "euclidean_camera_ray_distance_m":
                 source_depth = self._camera_ray_distance_to_z_depth(
                     source_depth,
@@ -910,6 +924,7 @@ class VGGNAVMethod1Dataset(Dataset[dict]):
                 "scene_key": session.scene_key,
                 "reference_frame_id": target_frame,
                 "source_frame_ids": frame_ids,
+                "missing_depth_frame_ids": missing_depth_frame_ids,
                 "history_frame_count": target_frame + 1,
                 "merged_source_complete_path": str(merged_complete_path),
                 "merged_source_visible_path": str(merged_observed_path),

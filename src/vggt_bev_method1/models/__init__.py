@@ -21,6 +21,12 @@ from .m05_plus import (
     RoleSeparatedPrefixTrunk,
     TemporalFrameProposal,
 )
+from .m05_pp import (
+    LatestHighResolutionCorrection,
+    LightweightSpatialResidualBlock,
+    M05PPHead,
+    M05PPSystem,
+)
 from .method1 import (
     FixedMetricBEVDecoder,
     Method1Head,
@@ -109,6 +115,10 @@ __all__ = [
     "ProjectedDenseMetricQuery",
     "RoleSeparatedPrefixTrunk",
     "TemporalFrameProposal",
+    "LatestHighResolutionCorrection",
+    "LightweightSpatialResidualBlock",
+    "M05PPHead",
+    "M05PPSystem",
     "DenseVGGTUnitQueryDecoder",
     "ImplicitGeometryBlock",
     "ImplicitGeometryContextTrunk",

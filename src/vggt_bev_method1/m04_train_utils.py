@@ -94,6 +94,7 @@ def build_m04_datasets(
         merged_bev_output_size=int(data["merged_source_output_size"]),
         include_single_targets=False,
         include_latest_temporal_targets=include_latest_temporal_targets,
+        missing_depth_policy=str(data.get("missing_depth_policy", "error")),
     )
     train = VGGNAVMethod1Dataset(session_keys=train_keys, **common)
     validation = VGGNAVMethod1Dataset(session_keys=validation_keys, **common)

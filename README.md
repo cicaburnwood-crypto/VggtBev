@@ -1,23 +1,27 @@
-# M05+ Per-cell Temporal Merged BEV
+# M05++ Coarse Temporal Reasoning + Latest-guided 512 BEV
 
-M05+ is the active branch pipeline. It maps a 1–10 frame RGB window to a native
-256 x 256 evidential BEV over a fixed 10 x 10 m extent. Frozen 512 x 512
-categorical targets are downsampled once with nearest-neighbor sampling. The frozen VGGT runs
-once; local/global patch-token halves remain separate through DPT-lite/FPN;
-Camera and sixteen Register tokens remain distinct through prefix attention;
-and every BEV cell independently attends over the latest anchor, historical
-proposals, and a learned Null route.
+M05++ is the active architecture experiment. It performs latest-frame
+reasoning, historical proposals, per-cell temporal selection, and heavy spatial
+refinement at 256 x 256. A single shallow correction then reads the latest-frame
+DPT patch pyramid at 512 x 512, followed by depthwise-separable boundary/output
+refinement. The final evidential BEV remains 512 x 512 over 10 x 10 m.
 
-Runtime still consumes RGB only. There is no extrinsic, camera-height, Single
-BEV, explicit geometry, FiLM-style conditioning, geometric auxiliary head, or
-Scale-to-BEV dependency. The Scale branch is parallel and omitted from default
-inference. See [M05_PLUS_IMPLEMENTATION.md](M05_PLUS_IMPLEMENTATION.md) for the
-architecture, loss, data, and current 8×A100 training contract.
+The prefix trunk is reduced to 4 x 512 while local/global DPT streams increase
+to 96 channels each. Camera and sixteen Register tokens remain distinct. The
+runtime still consumes RGB only, with no explicit geometry module, FiLM,
+geometric auxiliary head, or Scale-to-BEV dependency. See
+[M05_PP_IMPLEMENTATION.md](M05_PP_IMPLEMENTATION.md).
 
 ```bash
-pytest -q tests/test_m05_plus.py tests/test_m05.py tests/test_training_state.py
-scripts/launch_m05_plus_a100_8gpu.sh
+pytest -q tests/test_m05_pp.py
+scripts/launch_m05_pp_a100_8gpu.sh
 ```
+
+## M05+
+
+M05+ is preserved as the preceding full-native-query temporal experiment. See
+[M05_PLUS_IMPLEMENTATION.md](M05_PLUS_IMPLEMENTATION.md) for its architecture,
+loss, data, and 8×A100 training contract.
 
 ## Legacy M05
 
