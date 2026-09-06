@@ -1,30 +1,28 @@
-# M05 Latest-Anchored Reverse-Gated Merged BEV
+# M05+ Per-cell Temporal Merged BEV
 
-M05 is the active RGB-window to Merged-BEV-and-Scale pipeline. It restores a
-full native 512 x 512 query table, anchors the map with the latest frame, and
-then applies one shared gated deformable update to history frames from newest
-to oldest. A training-only latest-frame auxiliary prediction uses the proven
-Single-Baseline map objective; default runtime returns only Merged BEV.
-Camera and register prefix tokens retain separate readout paths; register
-summaries use learned type-aware pooling instead of averaging all 17 tokens.
+M05+ is the active branch pipeline. It maps a 1–10 frame RGB window to a native
+512 x 512 evidential BEV over a fixed 10 x 10 m extent. The frozen VGGT runs
+once; local/global patch-token halves remain separate through DPT-lite/FPN;
+Camera and sixteen Register tokens remain distinct through prefix attention;
+and every BEV cell independently attends over the latest anchor, historical
+proposals, and a learned Null route.
 
-The Merged raster has a fixed metric contract: 512 x 512 over 10 x 10 m,
-`x,z in [-5,5] m`. Existing 10 m GT supervises it directly without any
-Scale-dependent regrid. The parallel Scale Token does not condition BEV.
-Scale training is isolated and runtime computes it only with an explicit
-`include_scale=True` request.
-
-It reuses the existing 512 x 512, 10 x 10 m Merged supervision and requires no
-new data collection. See `M05_IMPLEMENTATION.md` for the complete architecture,
-loss, data, and runtime contracts.
+Runtime still consumes RGB only. There is no extrinsic, camera-height, Single
+BEV, explicit geometry, FiLM-style conditioning, geometric auxiliary head, or
+Scale-to-BEV dependency. The Scale branch is parallel and omitted from default
+inference. See [M05_PLUS_IMPLEMENTATION.md](M05_PLUS_IMPLEMENTATION.md) for the
+architecture, loss, data, and current 8×A100 training contract.
 
 ```bash
-pytest -q tests/test_m05.py tests/test_m04.py tests/test_dataset.py
-python -m vggt_bev_method1.cli_train_m05 \
-  --config configs/m05_reverse_gated_10m_template.toml \
-  --data-only
-scripts/train_m05.sh configs/m05_reverse_gated_10m_template.toml
+pytest -q tests/test_m05_plus.py tests/test_m05.py tests/test_training_state.py
+scripts/launch_m05_plus_a100_8gpu.sh
 ```
+
+## Legacy M05
+
+M05 uses a latest-anchored sequential reverse-gated history update and pooled
+prefix summaries. Its original architecture and reproducibility contract
+remain in [M05_IMPLEMENTATION.md](M05_IMPLEMENTATION.md).
 
 ## Legacy P1D Direct Merged BEV
 
@@ -118,13 +116,3 @@ python -m vggt_bev_method1.cli_audit_wtbd_scale \
   --config configs/wtbd_merge_scale_template.toml \
   --max-samples 2000
 ```
-# M05+
-
-M05+ is an independent, larger M05 variant with per-BEV-cell temporal frame
-attention, a history-count-invariant learned Null route, local/global DPT-lite
-patch fusion, and unpooled Camera/Register content attention. Its prefix path
-is jointly trained through BEV only: there is no explicit geometry module,
-FiLM-style modulation, geometry auxiliary loss, or separately trained geometry
-head. It reverses chronological RGB only at the frozen-VGGT boundary and
-requires a fresh v3 checkpoint. See
-[M05_PLUS_IMPLEMENTATION.md](M05_PLUS_IMPLEMENTATION.md).

@@ -110,7 +110,76 @@ metadata. The incompatible architecture uses checkpoint schema
 `m05plus-dpt-role-token-per-query-temporal-fixed-metric-512-v3` and must start
 fresh. V1/v2 checkpoints cannot strict-resume v3.
 
-Entry point:
+## Current execution path
+
+The production A100 path keeps the model, outputs, and primary losses intact
+while removing redundant execution:
+
+- All historical proposals are evaluated with the same shared decoder in
+  batches of up to nine frames instead of nine Python-level decoder calls.
+- Per-cell temporal logits and proposal fusion are tensorized across history.
+- Latest and Merged states share one batched spatial decode whenever the
+  training-only Latest auxiliary branch is active.
+- Cross-attention uses 65,536-query chunks and rematerializes 50% of chunks in
+  backward. This exchanges compute for memory without changing the function.
+- Spatial activations use channels-last layout; cuDNN benchmarking, BF16
+  autocast, fused AdamW, pinned persistent workers, and four-batch prefetching
+  are enabled.
+- DDP unused-parameter traversal is disabled. Zero-valued graph dependencies
+  retain every conditional parameter in the graph for one-frame samples.
+
+The Latest auxiliary objective is evaluated on every step for the first 20% of
+training. It is then evaluated every fourth step at four times its nominal
+multiplier, preserving its expected `0.10` contribution while avoiding three
+of four auxiliary decodes. History caps `[3, 5, 8, 10, 10]` progressively expose
+longer windows over the five epochs.
+
+## Frozen 8×A100 run
+
+The checked-in production profile is
+`configs/m05_plus_a100_8gpu_5e_frozen.toml`:
+
+| Item | Frozen value |
+|---|---:|
+| Epochs | 5 |
+| A100 GPUs | 8 |
+| Batch per GPU / global batch | 1 / 8 |
+| Optimizer | fused AdamW |
+| LR / minimum LR / weight decay | `1e-4` / `1e-5` / `0.02` |
+| Warmup | 3% |
+| Gradient clip | `1.0`, separately for BEV and Scale |
+| Validation batches | 500 |
+| Checkpoint interval | 5,000 steps |
+| Total optimizer steps | 334,570 |
+
+The valid frozen union contains 561,533 sessions across 1,076 scenes:
+
+| Source | Sessions |
+|---|---:|
+| Pro6000 (`medical_6000`) | 291,041 |
+| 5090 (`super_5090_boq06`) | 157,459 |
+| Industrial A100 | 113,033 |
+| **Total** | **561,533** |
+
+The grouped split contains 535,307 training sessions and 26,226 validation
+sessions. Its content SHA-256 is
+`7cce63f1592d696266aadc2f81a9c97637c169c943dafb305156e1c98cf482b3`.
+One 5090 directory with a stale `COMPLETE` marker but no `metadata.json` is
+recorded as invalid and excluded. The 571 MiB session-record cache binds to the
+same manifest hash so eight ranks do not independently rescan the dataset.
+
+Production entry point:
+
+```bash
+scripts/launch_m05_plus_a100_8gpu.sh
+```
+
+The launcher uses the existing `openpi` environment, eight local ranks, static
+localhost rendezvous at `127.0.0.1:29505`, and validates the cache/manifest hash
+before training. The data-specific manifest and cache are server artifacts and
+are intentionally not stored in Git.
+
+Generic entry point:
 
 ```bash
 GPU_COUNT=4 scripts/train_m05_plus.sh \
