@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import torch
 
 from vggt_bev_method1.data import (
@@ -76,6 +79,33 @@ def build_m04_datasets(
         ),
     )
     train_keys, validation_keys = manifest_session_keys(manifest)
+    incomplete_policy = str(data.get("incomplete_session_policy", "error"))
+    if incomplete_policy not in {"error", "skip"}:
+        raise ValueError("data.incomplete_session_policy must be error or skip")
+    if incomplete_policy == "skip":
+        index_path = Path(
+            str(data.get("incomplete_session_index", ""))
+        ).expanduser().resolve()
+        if not index_path.is_file():
+            raise FileNotFoundError(
+                f"incomplete-session index is missing: {index_path}"
+            )
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        if int(payload.get("format_version", 0)) != 1:
+            raise ValueError("incomplete-session index format is unsupported")
+        if payload.get("manifest_content_sha256") != manifest["content_sha256"]:
+            raise ValueError("incomplete-session index manifest SHA-256 mismatch")
+        if Path(payload.get("dataset_root", "")).resolve() != Path(
+            data["root"]
+        ).expanduser().resolve():
+            raise ValueError("incomplete-session index dataset root mismatch")
+        incomplete = set(payload.get("incomplete_session_keys", ()))
+        train_keys = [key for key in train_keys if key not in incomplete]
+        validation_keys = [key for key in validation_keys if key not in incomplete]
+        if not train_keys or not validation_keys:
+            raise ValueError(
+                "incomplete-session filtering emptied a dataset split"
+            )
     preprocess = RGBResizePad(int(data["image_height"]), int(data["image_width"]))
     common = dict(
         root=data["root"],
@@ -100,6 +130,10 @@ def build_m04_datasets(
     validation = VGGNAVMethod1Dataset(session_keys=validation_keys, **common)
     train.split_manifest_sha256 = manifest["content_sha256"]
     validation.split_manifest_sha256 = manifest["content_sha256"]
+    train.incomplete_session_count = len(incomplete) if incomplete_policy == "skip" else 0
+    validation.incomplete_session_count = (
+        len(incomplete) if incomplete_policy == "skip" else 0
+    )
     overlap = train.scene_keys.intersection(validation.scene_keys)
     if overlap:
         raise RuntimeError(f"M04 scene leakage detected: {sorted(overlap)[:10]}")
