@@ -1,0 +1,17 @@
+{
+  "date": "2026-09-10",
+  "protocol_id": "shmcamera2500_20260909_v6",
+  "snapshot_files_verified": 160,
+  "deployed_core_hashes_matched": 25,
+  "python_snapshot_syntax": "passed",
+  "cpu_unittest_count": 107,
+  "cpu_unittest_failures": 0,
+  "cpu_unittest_errors": 0,
+  "cpu_unittest_skipped": 0,
+  "cpu_test_command": "PYTHON=<existing-python-with-numpy-scipy-pillow> bash benchmark/run_cpu_tests.sh",
+  "local_cuda_visible_devices": "",
+  "gpu_workloads_started": false,
+  "benchmark_resumed": false,
+  "scope": "Source archive integrity and CPU regressions, not a fresh GPU or model-performance qualification",
+  "whitespace_note": "Original snapshot bytes are preserved, including one pre-existing trailing blank line in resize_allocation.py."
+}

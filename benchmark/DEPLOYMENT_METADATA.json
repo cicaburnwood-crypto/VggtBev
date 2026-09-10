@@ -1,0 +1,199 @@
+{
+  "protocol_id": "shmcamera2500_20260909_v6",
+  "protocol_sha256": "ceb38c1c1a7d694dc3377bf2a4b38187046cbc3ab7c5982b616729617f84df99",
+  "deployed_core_sha256": {
+    "exact_executor.py": "127680c31e4b755ca02d7a5defe647ad0e0f0e704a6e785a351988197e588f10",
+    "body_collision.py": "d0a7a5bcaa636049a0cde8b3b5f487cc6b33e17ad07f448f2a0e8bc0436a1438",
+    "robot_contract.py": "48dfde9486fe5f55f665628e5ac1d1eead59e7d2804973edd43c0ca4b08f954d",
+    "virtual_episode.py": "0c71a5431ace8cf383275f420b501a8f5f8344f74df989099389acbbea1e0f08",
+    "episode.py": "73d79f95a289c5f4c4d635edeb028b8e9c9b9bf47895c3c546445da621c05066",
+    "navigation_baseline_runtime.py": "b11c297890e18152a0bb61dcb93a8f0c242bb688a95596fb3c56ffa5b9ab5c97",
+    "hybrid_episode.py": "4b350a8d07018e2b155b4b6a518af84146464bc24c1ff982466b447c95bdfc43",
+    "native_velocity_episode.py": "12913d586c631118d6444ed4c5a57cd5b6e2b45bf7cf2998c84f033c76031a8e",
+    "native_motion.py": "47cca58efbd7a61a145f9c092015f2d1506ecdf5ae5d69a9b1b4c212de9a15c1",
+    "execution_policy.py": "2bdca0b9667c0c3e07dcc4b5013a8673077020a0f42467f41e58fc145f48eb03",
+    "native_platform_controls.py": "ea5b6a862ad0cd14352e22a4a01726aef94fa0b3e31c15f7e991b253677b5033",
+    "run_group.py": "4ab70e1f04fc43146d9ee339da28a0efe350491396ad5693b10d07bef797126f",
+    "dispatch.py": "85b4422355a24e2dce7acb132a3cc3c7bf14a9db2e2f952b642fde1c76305ffb",
+    "procthor_gpu.py": "cb9bbe2a71630ebbb24f5d283a62ec28a94251f9885108725fc03b5287bd28c3",
+    "resume_support.py": "af062d88b0fc50dd3413e4546e5682e45a4b94f08dd92ee8563c4ce29a87cb73",
+    "protocol.py": "528da0c32d639edfc86fbd28eb7d45094e823bc4607fea1b13e39355ea691bcb",
+    "summary.py": "d9eafd1998bf6910052424b94bb0ad75489776e395fd28e96ba7623e344a9008",
+    "launch.sh": "ce652fb49fc32d8711fcb38f3f1d0ffe190b48805e2c147830818b5719741139",
+    "interface_acceptance.py": "94c5c39c6933ef67b6e3b741cc178ece721169c5d1c8e43b7392b3068151fdc4",
+    "shm_runtime.py": "1444b48e49fbb65c8623f28b02be74b6cb4c1dea929114a84ef55cf14e613179",
+    "shm_contract.py": "4deb1718ec997af685d155b7fdb2379729df02dace415264b7ed3fcdd9e369f5",
+    "predicted_navigation.py": "5565eb86edf4e12908723f41dd914c08c55450617a31324ee710c182e31e9599",
+    "recovery_views.py": "8cda319b6c772e9d616701131d7614487fa062bff485f5eb7662facfb471ff75",
+    "planner_backends.py": "4c70402f45c86bd2f9d115fb10e34d9a09bec4d93df878d62a6c2919275d7e86",
+    "shm_support.py": "659a5a52f0294107cbb1bda3a43e5e656115bbc95565d51d8ea4a33ec0d4ce94"
+  },
+  "checked_methods": [
+    "our_model",
+    "limo_tel",
+    "limo_aug",
+    "omnivla",
+    "mbra_logonav",
+    "nomad",
+    "genie_samtp"
+  ],
+  "executor_code_sha256": {
+    "exact_executor.py": "127680c31e4b755ca02d7a5defe647ad0e0f0e704a6e785a351988197e588f10",
+    "body_collision.py": "d0a7a5bcaa636049a0cde8b3b5f487cc6b33e17ad07f448f2a0e8bc0436a1438",
+    "robot_contract.py": "48dfde9486fe5f55f665628e5ac1d1eead59e7d2804973edd43c0ca4b08f954d",
+    "virtual_episode.py": "0c71a5431ace8cf383275f420b501a8f5f8344f74df989099389acbbea1e0f08"
+  },
+  "environments": {
+    "scene_worker": {
+      "python": "Python 3.10.12",
+      "packages": {
+        "numpy": "1.26.4",
+        "scipy": "1.15.3",
+        "pillow": "11.3.0",
+        "torch": null,
+        "torchvision": null,
+        "transformers": null,
+        "safetensors": null,
+        "diffusers": null,
+        "timm": null,
+        "onnxruntime-gpu": null,
+        "ai2thor": "0+ca10d107fb46cb051dba99af484181fda9947a28",
+        "procthor": "0.0.1.dev2",
+        "prior": "1.0.3",
+        "habitat_sim": null,
+        "numpy-quaternion": null,
+        "opencv-python": "4.9.0.80",
+        "trimesh": "5.0.0",
+        "shapely": "2.1.2",
+        "huggingface-hub": null,
+        "xformers": null
+      }
+    },
+    "habitat_worker": {
+      "python": "Python 3.9.23",
+      "packages": {
+        "numpy": "1.26.4",
+        "scipy": "1.13.1",
+        "pillow": "10.4.0",
+        "torch": null,
+        "torchvision": null,
+        "transformers": null,
+        "safetensors": null,
+        "diffusers": null,
+        "timm": null,
+        "onnxruntime-gpu": null,
+        "ai2thor": null,
+        "procthor": null,
+        "prior": null,
+        "habitat_sim": "0.3.3",
+        "numpy-quaternion": "2023.0.4",
+        "opencv-python": null,
+        "trimesh": null,
+        "shapely": null,
+        "huggingface-hub": null,
+        "xformers": null
+      }
+    },
+    "shm_runtime": {
+      "python": "Python 3.10.20",
+      "packages": {
+        "numpy": "1.26.4",
+        "scipy": "1.15.3",
+        "pillow": "12.2.0",
+        "torch": "2.11.0+cu128",
+        "torchvision": "0.26.0+cu128",
+        "transformers": null,
+        "safetensors": "0.8.0",
+        "diffusers": null,
+        "timm": null,
+        "onnxruntime-gpu": null,
+        "ai2thor": null,
+        "procthor": null,
+        "prior": null,
+        "habitat_sim": null,
+        "numpy-quaternion": null,
+        "opencv-python": "4.11.0.86",
+        "trimesh": null,
+        "shapely": null,
+        "huggingface-hub": null,
+        "xformers": null
+      }
+    },
+    "baseline_runtime": {
+      "python": "Python 3.10.20",
+      "packages": {
+        "numpy": "1.26.4",
+        "scipy": "1.15.3",
+        "pillow": "12.2.0",
+        "torch": "2.11.0+cu128",
+        "torchvision": "0.26.0+cu128",
+        "transformers": "4.40.1",
+        "safetensors": "0.8.0",
+        "diffusers": "0.33.1",
+        "timm": "0.9.10",
+        "onnxruntime-gpu": "1.23.2",
+        "ai2thor": null,
+        "procthor": null,
+        "prior": null,
+        "habitat_sim": null,
+        "numpy-quaternion": null,
+        "opencv-python": "4.11.0.86",
+        "trimesh": null,
+        "shapely": null,
+        "huggingface-hub": "0.29.1",
+        "xformers": null
+      }
+    }
+  },
+  "external_sources_not_bundled": {
+    "less-is-more": {
+      "revision": null,
+      "source_file_count": 67,
+      "source_tree_sha256": "bcf4c1b50fb2dbf7416e0a66d6323433fab18bd386f5ab07d5bcdd2dc01794ac",
+      "entrypoint_sha256": {
+        "limo/src/models/components/limo_net.py": "4495471073d73dc677b3a407f52c1952d98de68628ca43050dcd32e78a0e1840"
+      }
+    },
+    "OmniVLA": {
+      "revision": null,
+      "source_file_count": 99,
+      "source_tree_sha256": "ba943c6f4f88761434dd3a8091fb8eebcef2b878ac974d1d0c35938dc50c6627",
+      "entrypoint_sha256": {
+        "inference/run_omnivla.py": "6bdd78a3533449cc8f1be6c14365650e8504bc072abc85e0bdedc2d1030679d0"
+      }
+    },
+    "navigation-model-zoo": {
+      "revision": null,
+      "source_file_count": 4,
+      "source_tree_sha256": "b2fe0e4d5b4c46421eb19ee6b0b258295c3e205750a2639ec84ba70c0f8a8a70",
+      "entrypoint_sha256": {
+        "MBRA_PG_Official/inference.py": "3a779ceb0f93a3b860906af152d72f6b04fa30b47ba469f81dd889c6d5e4916e"
+      }
+    },
+    "visualnav-transformer": {
+      "revision": "dca79815b704e5aa9c6bdc3082351f9e3b2848c2",
+      "source_file_count": 57,
+      "source_tree_sha256": "d94314f64fa8ba508995e961005285c7cc6685ce5fabcbb381ccad6419240e6a",
+      "entrypoint_sha256": {
+        "train/config/nomad.yaml": "eb1aa594abd62a97a8ece0c735a4d2274a703d0fffaa3a97b0f880a950bba463"
+      }
+    },
+    "diffusion_policy": {
+      "revision": "5ba07ac6661db573af695b419a7947ecb704690f",
+      "source_file_count": 234,
+      "source_tree_sha256": "2194a0b939e8c2673746504a073fb20a481eae86f3fd549951f6a27dbae13d24",
+      "entrypoint_sha256": {
+        "diffusion_policy/model/diffusion/conditional_unet1d.py": "8a95014f8aa52ade086f967c9018a66bf0c68f2133969c8f7a8522da01b472ac"
+      }
+    },
+    "GENIE-SAMTP": {
+      "revision": "Official source: https://github.com/jiaming-ai/GENIE-SAMTP\nCommit: 728aee296cf44288356de683b1948f18b05917d6\nIntegrated mode: RGB-only SAM-TP plus released BEV polynomial path planner",
+      "source_file_count": 77,
+      "source_tree_sha256": "90c3a91f58f6236f10f42bcecb97c1e8ec144e69225dca2e06a80cc034b2da3e",
+      "entrypoint_sha256": {
+        "genie_path_planner/planner.py": "daf19d65d0afac556a7a70e2c150ea11ea56cc073b5264de05b20bbd6cbfd651",
+        "sam2/sam_tp.py": "69e11aec868523edad060976cefaa3a260debcc55bcebf2daac6110e81a487ef"
+      }
+    }
+  }
+}

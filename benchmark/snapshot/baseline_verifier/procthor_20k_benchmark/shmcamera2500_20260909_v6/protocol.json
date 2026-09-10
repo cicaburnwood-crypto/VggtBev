@@ -1,0 +1,130 @@
+{
+  "protocol_id": "shmcamera2500_20260909_v6",
+  "execution_mode": "wall_clock_native_or_external_adapter_v6",
+  "task_schema": "native-or-external-long-route-shm-v6",
+  "our_model": {
+    "backbone": "accepted Single Baseline epoch10 step14320",
+    "bev_input": "SHM latest-wins fused occupancy probability and confidence",
+    "planner": "BIT* with prediction-only connectivity/subgoal/budget adapter",
+    "navigation_wrapper": "unknown_risk_v2_restored_exact_origin_v5",
+    "unknown_execution_budget_m": 0.2,
+    "search_budgets_s": [
+      0.55,
+      1.65
+    ],
+    "max_history": 10,
+    "history_sampling": "one fresh RGB per replan; FIFO, reset every route",
+    "fusion_pose": "VGGT predicted relative extrinsics only",
+    "fusion_metric_scale": "same camera-height-calibrated scale chain as v3",
+    "gt_pose_in_fusion": false,
+    "variant": "metric-calibrated benchmark SHM, not original fixed-extent Scale-Token-only comparison",
+    "support_boundary_policy": "eroded_predicted_support_unknown_border_v6",
+    "support_inset_pixels": 2
+  },
+  "geometry_schema": "bounded_camera_cuboid_20x20x50cm_v6",
+  "methods": [
+    "our_model",
+    "limo_tel",
+    "limo_aug",
+    "omnivla",
+    "mbra_logonav",
+    "nomad",
+    "genie_samtp"
+  ],
+  "sampling": {
+    "groups_per_source": {
+      "hm3d": 125,
+      "hssd": 125,
+      "mp3d": 125,
+      "procthor": 125
+    },
+    "routes_per_group": 5,
+    "master_seed": 2026090917,
+    "route_length_m": [
+      10,
+      25
+    ],
+    "upper_subgoal_arc_m": 2,
+    "initial_yaw_jitter_deg": 20,
+    "max_scene_attempts_per_group": 200,
+    "max_path_attempts_per_scene": 2000,
+    "scene_sampling": "random_with_replacement",
+    "route_sampling": "largest_same_floor_component; uniform_start_then_uniform_eligible_goal",
+    "split_claim": "no_held_out_scene_claim_until_training_overlap_audit",
+    "resample_all_models_failed": false
+  },
+  "robot": {
+    "speed_m_s": 1,
+    "yaw_rate_deg_s": 90,
+    "camera_height_m": 0.5,
+    "width_m": 0.2,
+    "length_m": 0.2,
+    "height_m": 0.5,
+    "tick_s": 0.02,
+    "collision_tolerance_m": 0.0001
+  },
+  "camera": {
+    "width": 640,
+    "height": 480,
+    "horizontal_fov_deg": 90,
+    "pitch_deg": 0
+  },
+  "execution": {
+    "mode": "native_controller_actuator_adapter_or_bidirectional_exact_polyline",
+    "reverse_allowed": true,
+    "native_actuator_adapter": "curvature_preserving_saturation_no_goal_or_map_input",
+    "nomad_metric_spacing_m": 0.05,
+    "nomad_spacing_source": "retained_original_0.2m_s_div_4Hz_calibration_not_actuator_speed_cap",
+    "external_recovery_observation_turns": 6,
+    "external_replan_prefix_m": 0.5,
+    "native_methods": [
+      "omnivla",
+      "mbra_logonav",
+      "nomad"
+    ],
+    "external_methods": [
+      "our_model",
+      "limo_tel",
+      "limo_aug",
+      "genie_samtp"
+    ],
+    "native_inference_hz": {
+      "omnivla": 3,
+      "mbra_logonav": 5,
+      "nomad": 4
+    },
+    "nomad_publish_hz": 9,
+    "nomad_waypoint_timeout_s": 1,
+    "preserve_native_planar_vertices": true,
+    "native_velocity_controller_used": "native_methods_only",
+    "native_intermediate_se2_yaw_used": "LiMo native heading selects forward/reverse tangent branch; XY positions exact, yaw projected to nonholonomic tangent",
+    "inference_motion_overlap": "native_methods_only",
+    "gt_future_path_veto": false,
+    "goal_acceptance_m": 0.2,
+    "planner_safety_margin_m": 0.05,
+    "deadline_seconds": "max(300, 20 * gt_reference_length_m + 60)",
+    "distance_budget_m": "3 * gt_reference_length_m + 5"
+  },
+  "information": {
+    "common_guide": "fixed_same_floor_GT_graph_route",
+    "common_localization": "exact_shared_pose_for_current_subgoal_transform_and_path_anchoring",
+    "local_model_inputs": "RGB + current_metric_PointGoal + fixed_calibration_when_required",
+    "nomad_exception": "current_subgoal_ImageGoal; not a strict equal-input PointGoal baseline",
+    "local_model_forbidden": [
+      "GT_BEV",
+      "GT_depth",
+      "GT_obstacles",
+      "future_global_route",
+      "GT_trajectory_history"
+    ]
+  },
+  "metrics": {
+    "primary_denominator": "all_frozen_valid_routes_including_all_failed",
+    "conditional_denominator": "routes_with_at_least_one_success",
+    "reference": "conservative_discrete_same_floor_GT_graph_not_continuous_optimum",
+    "length_ratio_clamp": false,
+    "timing": "measured_monotonic_wall_time_including_inference_render_turn_translate_wait",
+    "initialization_and_warmup": "reported_separately_and_in_resource_total",
+    "rank_runtime_on": "paired_successes_not_fast_failures"
+  }
+}
