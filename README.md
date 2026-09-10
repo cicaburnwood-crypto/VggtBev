@@ -1,6 +1,25 @@
-# M05++ Coarse Temporal Reasoning + Latest-guided 512 BEV
+# M06 — A100 training snapshot
 
-M05++ is the active architecture experiment. It performs latest-frame
+M06 names the current production M05+ training code, synchronized from the
+A100 server on 2026-09-10. It is **not** the M05++ architecture experiment.
+Internal Python modules, pipeline identifiers and checkpoint schemas retain
+their M05+ names for compatibility with existing checkpoints.
+
+- Frozen VGGT; RGB history only, up to 10 frames.
+- Separate local/global DPT-lite streams (48 channels each); role-separated
+  Camera + 16 Register tokens; prefix trunk: 8 layers, width 1024.
+- Per-cell temporal attention; native 256 x 256 BEV over 10 x 10 metres.
+- No FiLM, explicit geometry conditioning or separately trained geometry head.
+- Eight A100 GPUs, global batch 8, 10-epoch schedule; incomplete sessions skipped.
+- Latest saved training progress: step 290,000 / 669,130 (43.34%), epoch 5 in progress.
+  Training stopped after that checkpoint on 2026-09-10 at 08:15 HKT.
+
+See [M06_TRAINING.md](M06_TRAINING.md) for the exact active config and provenance.
+Weights, datasets, manifests, caches and logs are not included in this repository.
+
+## Archived M05++ experiment
+
+M05++ is an archived architecture experiment. It performs latest-frame
 reasoning, historical proposals, per-cell temporal selection, and heavy spatial
 refinement at 256 x 256. A single shallow correction then reads the latest-frame
 DPT patch pyramid at 512 x 512, followed by depthwise-separable boundary/output
